@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/chazu/procyon/blob/main/img/logo.png">
+</p>
+
 # Procyon
 
 *Procyon: the genus for raccoons - because what goes better with trash?*
