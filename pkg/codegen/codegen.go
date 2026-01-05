@@ -474,8 +474,67 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 	case *parser.ExprStmt:
 		return []jen.Code{g.generateExpr(s.Expr, m)}
 
+	case *parser.IfExpr:
+		return g.generateIfStatement(s, m)
+
+	case *parser.WhileExpr:
+		return g.generateWhileStatement(s, m)
+
 	default:
 		return []jen.Code{jen.Comment("unknown statement")}
+	}
+}
+
+// generateIfStatement generates Go if/else from Trashtalk ifTrue:/ifFalse:
+func (g *generator) generateIfStatement(s *parser.IfExpr, m *compiledMethod) []jen.Code {
+	condition := g.generateExpr(s.Condition, m)
+
+	// Generate true block statements
+	var trueStmts []jen.Code
+	for _, stmt := range s.TrueBlock {
+		trueStmts = append(trueStmts, g.generateStatement(stmt, m)...)
+	}
+
+	// Generate false block statements if present
+	var falseStmts []jen.Code
+	for _, stmt := range s.FalseBlock {
+		falseStmts = append(falseStmts, g.generateStatement(stmt, m)...)
+	}
+
+	// Build the if statement
+	if len(s.TrueBlock) > 0 && len(s.FalseBlock) > 0 {
+		// ifTrue: [true] ifFalse: [false]
+		return []jen.Code{
+			jen.If(condition).Block(trueStmts...).Else().Block(falseStmts...),
+		}
+	} else if len(s.TrueBlock) > 0 {
+		// ifTrue: [true] only
+		return []jen.Code{
+			jen.If(condition).Block(trueStmts...),
+		}
+	} else if len(s.FalseBlock) > 0 {
+		// ifFalse: [false] only - negate condition
+		return []jen.Code{
+			jen.If(jen.Op("!").Parens(condition)).Block(falseStmts...),
+		}
+	}
+
+	return []jen.Code{jen.Comment("empty if statement")}
+}
+
+// generateWhileStatement generates Go for loop from Trashtalk whileTrue:
+func (g *generator) generateWhileStatement(s *parser.WhileExpr, m *compiledMethod) []jen.Code {
+	condition := g.generateExpr(s.Condition, m)
+
+	// Generate body statements
+	var bodyStmts []jen.Code
+	for _, stmt := range s.Body {
+		bodyStmts = append(bodyStmts, g.generateStatement(stmt, m)...)
+	}
+
+	// Go's "while" is just "for condition"
+	return []jen.Code{
+		jen.For(condition).Block(bodyStmts...),
 	}
 }
 
@@ -495,6 +554,11 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 			return left.Op("/").Add(right)
 		}
 		return jen.Comment("unknown op: " + e.Op)
+
+	case *parser.ComparisonExpr:
+		left := g.generateExpr(e.Left, m)
+		right := g.generateExpr(e.Right, m)
+		return left.Op(e.Op).Add(right)
 
 	case *parser.Identifier:
 		name := e.Name

@@ -84,6 +84,42 @@ type UnsupportedExpr struct {
 
 func (UnsupportedExpr) exprNode() {}
 
+// ComparisonExpr represents: left op right (where op is >, <, >=, <=, ==, !=)
+type ComparisonExpr struct {
+	Left  Expr
+	Op    string
+	Right Expr
+}
+
+func (ComparisonExpr) exprNode() {}
+
+// IfExpr represents: (condition) ifTrue: [trueBlock] ifFalse: [falseBlock]
+type IfExpr struct {
+	Condition  Expr
+	TrueBlock  []Statement
+	FalseBlock []Statement // nil for ifTrue: only
+}
+
+func (IfExpr) exprNode() {}
+func (IfExpr) stmtNode() {}
+
+// WhileExpr represents: [condition] whileTrue: [body]
+type WhileExpr struct {
+	Condition Expr
+	Body      []Statement
+}
+
+func (WhileExpr) exprNode() {}
+func (WhileExpr) stmtNode() {}
+
+// BlockExpr represents a block literal: [:param1 :param2 | body]
+type BlockExpr struct {
+	Params     []string
+	Statements []Statement
+}
+
+func (BlockExpr) exprNode() {}
+
 // MethodBody represents a parsed method body
 type MethodBody struct {
 	LocalVars  []string
@@ -203,16 +239,161 @@ func (p *Parser) parseStatement() (Statement, error) {
 		}
 	}
 
-	// Otherwise try to parse as expression statement
+	// Parse expression and check for control flow
 	expr, err := p.parseExpr()
 	if err != nil {
 		return nil, err
 	}
+
+	// Check for control flow keywords after the expression
+	if p.peek().Type == ast.TokenKeyword {
+		keyword := p.peek().Value
+		switch keyword {
+		case "ifTrue:":
+			return p.parseIfTrue(expr)
+		case "ifFalse:":
+			return p.parseIfFalse(expr)
+		case "whileTrue:":
+			return p.parseWhileTrue(expr)
+		}
+	}
+
 	return &ExprStmt{Expr: expr}, nil
 }
 
+// parseIfTrue parses: (condition) ifTrue: [block] [ifFalse: [block]]
+func (p *Parser) parseIfTrue(condition Expr) (Statement, error) {
+	p.advance() // consume "ifTrue:"
+
+	trueBlock, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for optional ifFalse:
+	var falseBlock []Statement
+	p.skipNewlines()
+	if p.peek().Type == ast.TokenKeyword && p.peek().Value == "ifFalse:" {
+		p.advance() // consume "ifFalse:"
+		falseBlock, err = p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &IfExpr{
+		Condition:  condition,
+		TrueBlock:  trueBlock,
+		FalseBlock: falseBlock,
+	}, nil
+}
+
+// parseIfFalse parses: (condition) ifFalse: [block]
+func (p *Parser) parseIfFalse(condition Expr) (Statement, error) {
+	p.advance() // consume "ifFalse:"
+
+	falseBlock, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// ifFalse: alone means: if NOT condition, do block
+	// We represent this as IfExpr with only FalseBlock set
+	return &IfExpr{
+		Condition:  condition,
+		TrueBlock:  nil,
+		FalseBlock: falseBlock,
+	}, nil
+}
+
+// parseWhileTrue parses: [condition] whileTrue: [body]
+func (p *Parser) parseWhileTrue(condition Expr) (Statement, error) {
+	p.advance() // consume "whileTrue:"
+
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	return &WhileExpr{
+		Condition: condition,
+		Body:      body,
+	}, nil
+}
+
+// parseBlock parses: [statements]
+func (p *Parser) parseBlock() ([]Statement, error) {
+	if p.peek().Type != ast.TokenLBracket {
+		return nil, fmt.Errorf("expected [ to start block, got %s", p.peek().Type)
+	}
+	p.advance() // consume [
+
+	var statements []Statement
+
+	// Parse statements until we hit ]
+	for !p.atEnd() && p.peek().Type != ast.TokenRBracket {
+		p.skipNewlines()
+		if p.peek().Type == ast.TokenRBracket {
+			break
+		}
+
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		if stmt != nil {
+			statements = append(statements, stmt)
+		}
+	}
+
+	if p.peek().Type != ast.TokenRBracket {
+		return nil, fmt.Errorf("expected ] to end block, got %s", p.peek().Type)
+	}
+	p.advance() // consume ]
+
+	return statements, nil
+}
+
 func (p *Parser) parseExpr() (Expr, error) {
-	return p.parseAddSub()
+	return p.parseComparison()
+}
+
+func (p *Parser) parseComparison() (Expr, error) {
+	left, err := p.parseAddSub()
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for comparison operators
+	for !p.atEnd() {
+		tok := p.peek()
+		var op string
+		switch tok.Type {
+		case ast.TokenGT:
+			op = ">"
+		case ast.TokenLT:
+			op = "<"
+		case ast.TokenGE:
+			op = ">="
+		case ast.TokenLE:
+			op = "<="
+		case ast.TokenEQ:
+			op = "=="
+		case ast.TokenNE:
+			op = "!="
+		default:
+			return left, nil
+		}
+
+		p.advance()
+		right, err := p.parseAddSub()
+		if err != nil {
+			return nil, err
+		}
+		left = &ComparisonExpr{Left: left, Op: op, Right: right}
+	}
+
+	return left, nil
 }
 
 func (p *Parser) parseAddSub() (Expr, error) {
@@ -283,6 +464,19 @@ func (p *Parser) parsePrimary() (Expr, error) {
 			val = val[1 : len(val)-1]
 		}
 		return &StringLit{Value: val}, nil
+
+	case ast.TokenLParen:
+		// Parenthesized expression: (expr)
+		p.advance() // consume (
+		expr, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if p.peek().Type != ast.TokenRParen {
+			return nil, fmt.Errorf("expected ) after parenthesized expression, got %s", p.peek().Type)
+		}
+		p.advance() // consume )
+		return expr, nil
 
 	case ast.TokenVariable:
 		// $variable - can't compile

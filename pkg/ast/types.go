@@ -96,4 +96,19 @@ const (
 	TokenColon      = "COLON"
 	TokenLBracket   = "LBRACKET"
 	TokenRBracket   = "RBRACKET"
+
+	// Comparison operators
+	TokenGT      = "GT"      // >
+	TokenLT      = "LT"      // <
+	TokenGE      = "GE"      // >=
+	TokenLE      = "LE"      // <=
+	TokenEQ      = "EQ"      // ==
+	TokenNE      = "NE"      // !=
+	TokenEquals  = "EQUALS"  // = (single equals, for comparisons)
+	TokenPercent = "PERCENT" // % (modulo)
+
+	// Control flow
+	TokenKeyword = "KEYWORD" // identifier followed by colon (e.g., "ifTrue:")
+	TokenLParen  = "LPAREN"  // (
+	TokenRParen  = "RPAREN"  // )
 )
