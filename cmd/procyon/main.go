@@ -18,7 +18,7 @@ var (
 	version = flag.Bool("version", false, "print version and exit")
 )
 
-const versionStr = "0.1.0"
+const versionStr = "0.2.0"
 
 func main() {
 	flag.Usage = func() {
