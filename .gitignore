@@ -1,5 +1,5 @@
-# Binary
-procyon
+# Binary (root-level only, not cmd/procyon/)
+/procyon
 
 # Test artifacts
 *.native
