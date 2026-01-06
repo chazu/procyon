@@ -19,7 +19,7 @@ var (
 	mode    = flag.String("mode", "binary", "output mode: binary (standalone) or plugin (c-shared library)")
 )
 
-const versionStr = "0.6.0"
+const versionStr = "0.7.0"
 
 func main() {
 	flag.Usage = func() {
