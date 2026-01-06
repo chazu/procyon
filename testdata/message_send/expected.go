@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-//go:embed Counter.trash
+//go:embed MessageSendTest.trash
 var _sourceCode string
 
 var _contentHash string
@@ -28,7 +28,7 @@ func init() {
 
 var ErrUnknownSelector = errors.New("unknown selector")
 
-type Counter struct {
+type MessageSendTest struct {
 	Class     string   `json:"class"`
 	CreatedAt string   `json:"created_at"`
 	Vars      []string `json:"_vars"`
@@ -38,9 +38,9 @@ type Counter struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
-		fmt.Fprintln(os.Stderr, "       Counter.native --source")
-		fmt.Fprintln(os.Stderr, "       Counter.native --hash")
+		fmt.Fprintln(os.Stderr, "Usage: MessageSendTest.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "       MessageSendTest.native --source")
+		fmt.Fprintln(os.Stderr, "       MessageSendTest.native --hash")
 		os.Exit(1)
 	}
 
@@ -52,12 +52,12 @@ func main() {
 		fmt.Println(_contentHash)
 		return
 	case "--info":
-		fmt.Printf("Class: Counter\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
+		fmt.Printf("Class: MessageSendTest\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
 		return
 	}
 
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: MessageSendTest.native <instance_id> <selector> [args...]")
 		os.Exit(1)
 	}
 
@@ -65,7 +65,7 @@ func main() {
 	selector := os.Args[2]
 	args := os.Args[3:]
 
-	if receiver == "Counter" || receiver == "Counter" {
+	if receiver == "MessageSendTest" || receiver == "MessageSendTest" {
 		result, err := dispatchClass(selector, args)
 		if err != nil {
 			if errors.Is(err, ErrUnknownSelector) {
@@ -120,20 +120,20 @@ func openDB() (*sql.DB, error) {
 	return sql.Open("sqlite3", dbPath)
 }
 
-func loadInstance(db *sql.DB, id string) (*Counter, error) {
+func loadInstance(db *sql.DB, id string) (*MessageSendTest, error) {
 	var data string
 	err := db.QueryRow("SELECT data FROM instances WHERE id = ?", id).Scan(&data)
 	if err != nil {
 		return nil, err
 	}
-	var instance Counter
+	var instance MessageSendTest
 	if err := json.Unmarshal([]byte(data), &instance); err != nil {
 		return nil, err
 	}
 	return &instance, nil
 }
 
-func saveInstance(db *sql.DB, id string, instance *Counter) error {
+func saveInstance(db *sql.DB, id string, instance *MessageSendTest) error {
 	data, err := json.Marshal(instance)
 	if err != nil {
 		return err
@@ -158,34 +158,22 @@ func sendMessage(receiver interface{}, selector string, args ...interface{}) (st
 	return strings.TrimSpace(string(output)), nil
 }
 
-func dispatch(c *Counter, selector string, args []string) (string, error) {
+func dispatch(c *MessageSendTest, selector string, args []string) (string, error) {
 	switch selector {
 	case "getValue":
 		return c.GetValue(), nil
-	case "getStep":
-		return c.GetStep(), nil
 	case "setValue_":
 		if len(args) < 1 {
 			return "", fmt.Errorf("setValue_ requires 1 argument")
 		}
 		return c.SetValue(args[0])
-	case "setStep_":
-		if len(args) < 1 {
-			return "", fmt.Errorf("setStep_ requires 1 argument")
-		}
-		return c.SetStep(args[0])
 	case "increment":
-		return c.Increment(), nil
-	case "decrement":
-		return c.Decrement(), nil
-	case "incrementBy_":
-		if len(args) < 1 {
-			return "", fmt.Errorf("incrementBy_ requires 1 argument")
-		}
-		return c.IncrementBy(args[0])
-	case "reset":
-		c.Reset()
+		c.Increment()
 		return "", nil
+	case "testSelfSendUnary":
+		return c.TestSelfSendUnary(), nil
+	case "testSelfSendKeyword":
+		return c.TestSelfSendKeyword(), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
@@ -193,71 +181,35 @@ func dispatch(c *Counter, selector string, args []string) (string, error) {
 
 func dispatchClass(selector string, args []string) (string, error) {
 	switch selector {
-	case "description":
-		return Description(), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
 }
 
-func (c *Counter) GetValue() string {
-	return strconv.Itoa(c.Value + 0)
+func (c *MessageSendTest) GetValue() string {
+	return strconv.Itoa(c.Value)
 }
 
-func (c *Counter) GetStep() string {
-	return strconv.Itoa(c.Step + 0)
-}
-
-func (c *Counter) SetValue(val string) (string, error) {
-	valInt, err := strconv.Atoi(val)
+func (c *MessageSendTest) SetValue(x string) (string, error) {
+	xInt, err := strconv.Atoi(x)
 	if err != nil {
 		return "", err
 	}
-	_ = valInt
-	c.Value = valInt + 0
+	_ = xInt
+	c.Value = xInt
 	return "", nil
 }
 
-func (c *Counter) SetStep(val string) (string, error) {
-	valInt, err := strconv.Atoi(val)
-	if err != nil {
-		return "", err
-	}
-	_ = valInt
-	c.Step = valInt + 0
-	return "", nil
+func (c *MessageSendTest) Increment() {
+	c.Value = c.Value + c.Step
 }
 
-func (c *Counter) Increment() string {
-	var newVal int
-	newVal = c.Value + c.Step
-	c.Value = newVal + 0
-	return strconv.Itoa(newVal + 0)
+func (c *MessageSendTest) TestSelfSendUnary() string {
+	c.Increment()
+	return c.GetValue()
 }
 
-func (c *Counter) Decrement() string {
-	var newVal int
-	newVal = c.Value - c.Step
-	c.Value = newVal + 0
-	return strconv.Itoa(newVal + 0)
-}
-
-func (c *Counter) IncrementBy(amount string) (string, error) {
-	amountInt, err := strconv.Atoi(amount)
-	if err != nil {
-		return "", err
-	}
-	_ = amountInt
-	var newVal int
-	newVal = c.Value + amountInt
-	c.Value = newVal + 0
-	return "", nil
-}
-
-func (c *Counter) Reset() {
-	c.Value = 0 + 0
-}
-
-func Description() string {
-	return "A simple counter"
+func (c *MessageSendTest) TestSelfSendKeyword() string {
+	c.SetValue(strconv.Itoa(42))
+	return c.GetValue()
 }

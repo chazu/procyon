@@ -46,20 +46,26 @@ procyon/
 
 5. **Self-describing binaries**: Each binary embeds its source code and content hash via `//go:embed`.
 
-## Current Capabilities (M1)
+## Current Capabilities (M1-M5)
 
 **Compiles:**
 - Instance variable access/assignment
 - Local variable declarations (`| x y |`)
 - Binary arithmetic (`+`, `-`, `*`, `/`)
+- Comparison operators (`>`, `<`, `>=`, `<=`, `==`, `!=`)
+- Control flow (`ifTrue:`, `ifFalse:`, `ifTrue:ifFalse:`)
+- While loops (`whileTrue:`)
+- Parenthesized expressions
 - Return statements (`^`)
 - Methods with arguments (string → int conversion)
+- Self message sends (`@ self method`, `@ self keyword: arg`)
+- External message sends (`@ OtherClass method`) via shell-out
+- Namespaced classes (`package: MyApp` → `MyApp__Counter.native`)
+- Class methods (`classMethod:` → package-level Go functions)
 
 **Falls back to Bash:**
 - `new` method (uses subshells)
-- Class methods
-- Message sends (`@ receiver selector`)
-- Control flow (`ifTrue:`, `whileTrue:`)
+- Trait methods (inlining not yet implemented)
 - Raw methods
 - Subshell expressions (`$(...)`)
 
@@ -72,13 +78,13 @@ go test ./...                    # All tests
 
 Acceptance tests compare generated code against `testdata/*/expected.go`.
 
-## Next Steps (M2+)
+## Next Steps (M6)
 
 See DESIGN.md for the full roadmap. Key upcoming work:
 
-1. **Control flow**: `ifTrue:`/`ifFalse:` → if/else, `whileTrue:` → for
-2. **Message sends**: `@ self method` → direct call, `@ Other method` → shell out
-3. **Traits**: Inline trait methods into generated code
+1. **Polish (M6)**: Better error messages, `--strict` mode improvements, documentation
+
+**Note**: Trait method inlining is deferred - existing traits use Bash-specific constructs that can't compile to Go. See docs/trait-inlining.md for the planned approach when needed.
 
 ## Common Tasks
 

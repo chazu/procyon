@@ -201,15 +201,26 @@ Generated binaries share the same SQLite database (`~/.trashtalk/instances.db`) 
 | `x := a + b` | `x = a + b` |
 | `^ value` | `return value` |
 
+## What Compiles (continued)
+
+| Trashtalk | Go |
+|-----------|-----|
+| `(a > b) ifTrue: [...]` | `if a > b { ... }` |
+| `(a > b) ifTrue: [...] ifFalse: [...]` | `if a > b { ... } else { ... }` |
+| `[cond] whileTrue: [...]` | `for cond { ... }` |
+| `@ self method` | `c.Method()` (direct call) |
+| `@ self keyword: arg` | `c.Keyword(arg)` (direct call) |
+| `@ OtherClass method` | `sendMessage(...)` (shells out to Bash) |
+| `package: MyApp` | Binary named `MyApp__Counter.native` |
+| `classMethod: foo [...]` | `func Foo() string` (package-level function) |
+
 ## What Falls Back to Bash
 
 | Construct | Reason |
 |-----------|--------|
 | `rawMethod:` | Contains arbitrary Bash |
 | `$(...)` subshells | Need Bash evaluation |
-| `@ receiver selector` | Message sends not yet implemented |
-| `classMethod:` | Class methods not yet implemented |
-| `ifTrue:`, `whileTrue:` | Control flow not yet implemented |
+| Trait methods | Trait inlining not yet implemented |
 
 ## Testing
 
@@ -238,17 +249,31 @@ See [DESIGN.md](DESIGN.md) for the full design document.
 - Generate dispatch switch
 - Embed source and hash
 
-### M2: Control Flow
+### M2: Control Flow ✅
 - `ifTrue:`/`ifFalse:` → `if`/`else`
 - `whileTrue:` → `for` loops
+- Comparison operators (`>`, `<`, `>=`, `<=`, `==`, `!=`)
+- Parenthesized expressions
 - Early return (`^`)
 
-### M3: Message Sends & Traits
-- `@ self method` → direct method call
-- `@ OtherClass method` → shell out to Bash
-- Trait method inlining
+### M3: Message Sends & Traits ✅
+- ✅ `@ self method` → direct method call
+- ✅ `@ self keyword: arg` → method call with args
+- ✅ `@ OtherClass method` → shell out to Bash via `sendMessage()`
+- Trait inlining deferred (see docs/trait-inlining.md)
 
-### M4: Polish
+### M4: Namespace Support ✅
+- `package:` declarations
+- Qualified class names (`MyApp::Counter`)
+- Correct binary naming (`MyApp__Counter.native`)
+- `--info` shows package and qualified name
+
+### M5: Class Methods ✅
+- `classMethod:` compilation to package-level functions
+- `dispatchClass()` for class-level dispatch
+- Receiver detection (class name vs instance ID)
+
+### M6: Polish (Next)
 - Better error messages
 - `--strict` mode improvements
 - Type inference improvements

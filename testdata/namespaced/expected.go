@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-//go:embed Counter.trash
+//go:embed MyApp__Counter.trash
 var _sourceCode string
 
 var _contentHash string
@@ -33,14 +33,13 @@ type Counter struct {
 	CreatedAt string   `json:"created_at"`
 	Vars      []string `json:"_vars"`
 	Value     int      `json:"value"`
-	Step      int      `json:"step"`
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
-		fmt.Fprintln(os.Stderr, "       Counter.native --source")
-		fmt.Fprintln(os.Stderr, "       Counter.native --hash")
+		fmt.Fprintln(os.Stderr, "Usage: MyApp__Counter.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "       MyApp__Counter.native --source")
+		fmt.Fprintln(os.Stderr, "       MyApp__Counter.native --hash")
 		os.Exit(1)
 	}
 
@@ -52,12 +51,12 @@ func main() {
 		fmt.Println(_contentHash)
 		return
 	case "--info":
-		fmt.Printf("Class: Counter\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
+		fmt.Printf("Class: MyApp::Counter\nPackage: MyApp\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
 		return
 	}
 
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: MyApp__Counter.native <instance_id> <selector> [args...]")
 		os.Exit(1)
 	}
 
@@ -65,7 +64,7 @@ func main() {
 	selector := os.Args[2]
 	args := os.Args[3:]
 
-	if receiver == "Counter" || receiver == "Counter" {
+	if receiver == "Counter" || receiver == "MyApp::Counter" {
 		result, err := dispatchClass(selector, args)
 		if err != nil {
 			if errors.Is(err, ErrUnknownSelector) {
@@ -162,30 +161,8 @@ func dispatch(c *Counter, selector string, args []string) (string, error) {
 	switch selector {
 	case "getValue":
 		return c.GetValue(), nil
-	case "getStep":
-		return c.GetStep(), nil
-	case "setValue_":
-		if len(args) < 1 {
-			return "", fmt.Errorf("setValue_ requires 1 argument")
-		}
-		return c.SetValue(args[0])
-	case "setStep_":
-		if len(args) < 1 {
-			return "", fmt.Errorf("setStep_ requires 1 argument")
-		}
-		return c.SetStep(args[0])
 	case "increment":
 		return c.Increment(), nil
-	case "decrement":
-		return c.Decrement(), nil
-	case "incrementBy_":
-		if len(args) < 1 {
-			return "", fmt.Errorf("incrementBy_ requires 1 argument")
-		}
-		return c.IncrementBy(args[0])
-	case "reset":
-		c.Reset()
-		return "", nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
@@ -193,71 +170,16 @@ func dispatch(c *Counter, selector string, args []string) (string, error) {
 
 func dispatchClass(selector string, args []string) (string, error) {
 	switch selector {
-	case "description":
-		return Description(), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
 }
 
 func (c *Counter) GetValue() string {
-	return strconv.Itoa(c.Value + 0)
-}
-
-func (c *Counter) GetStep() string {
-	return strconv.Itoa(c.Step + 0)
-}
-
-func (c *Counter) SetValue(val string) (string, error) {
-	valInt, err := strconv.Atoi(val)
-	if err != nil {
-		return "", err
-	}
-	_ = valInt
-	c.Value = valInt + 0
-	return "", nil
-}
-
-func (c *Counter) SetStep(val string) (string, error) {
-	valInt, err := strconv.Atoi(val)
-	if err != nil {
-		return "", err
-	}
-	_ = valInt
-	c.Step = valInt + 0
-	return "", nil
+	return strconv.Itoa(c.Value)
 }
 
 func (c *Counter) Increment() string {
-	var newVal int
-	newVal = c.Value + c.Step
-	c.Value = newVal + 0
-	return strconv.Itoa(newVal + 0)
-}
-
-func (c *Counter) Decrement() string {
-	var newVal int
-	newVal = c.Value - c.Step
-	c.Value = newVal + 0
-	return strconv.Itoa(newVal + 0)
-}
-
-func (c *Counter) IncrementBy(amount string) (string, error) {
-	amountInt, err := strconv.Atoi(amount)
-	if err != nil {
-		return "", err
-	}
-	_ = amountInt
-	var newVal int
-	newVal = c.Value + amountInt
-	c.Value = newVal + 0
-	return "", nil
-}
-
-func (c *Counter) Reset() {
-	c.Value = 0 + 0
-}
-
-func Description() string {
-	return "A simple counter"
+	c.Value = c.Value + 1
+	return strconv.Itoa(c.Value)
 }

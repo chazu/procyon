@@ -343,7 +343,7 @@ After M1: compile generated Counter, run against same SQLite DB as Bash version,
 
 ## Milestones
 
-### M1: Minimal Viable Generator
+### M1: Minimal Viable Generator ✅ Complete
 - Parse AST JSON
 - Generate struct from instanceVars
 - Generate simple arithmetic methods (no control flow)
@@ -351,20 +351,35 @@ After M1: compile generated Counter, run against same SQLite DB as Bash version,
 - Embed source and hash
 - Acceptance test framework in place
 
-### M2: Control Flow
+### M2: Control Flow ✅ Complete
 - ifTrue:/ifFalse: → if/else
 - whileTrue: → for loops
+- Comparison operators (>, <, >=, <=, ==, !=)
+- Parenthesized expressions
 - Early return (^)
 
-### M3: Message Sends & Traits
+### M3: Message Sends & Traits ✅ Complete
 - @ self method → direct method call
 - @ self keyword: arg → method call with args
-- @ OtherClass method → shell out to Bash
-- Trait method inlining
+- @ OtherClass method → shell out to Bash via sendMessage()
+- Trait awareness (warns when traits present, falls back to Bash)
+- Full trait inlining deferred - see docs/trait-inlining.md
 
-### M4: Polish
+### M4: Namespace Support ✅ Complete
+- Handle `package:` declarations
+- Qualified class names (MyApp::Counter)
+- Correct binary naming (MyApp__Counter.native)
+- --info shows package and qualified name
+- See docs/namespace-support.md
+
+### M5: Class Methods ✅ Complete
+- `classMethod:` compilation to package-level functions
+- Class-level dispatch via `dispatchClass()`
+- Receiver detection (class name vs instance ID)
+
+### M6: Polish (Next)
 - Better error messages
-- --strict mode
+- --strict mode improvements
 - Type inference improvements
 - Documentation
 
@@ -372,7 +387,7 @@ After M1: compile generated Counter, run against same SQLite DB as Bash version,
 
 These will be decided when we encounter them, keeping the simplest working approach:
 
-1. **Trait method resolution**: Inline vs standalone - decide when implementing traits
+1. **Trait method inlining**: Deferred - existing traits use Bash constructs. See docs/trait-inlining.md
 2. **Error handling style**: `(result, error)` vs panic/recover - decide when implementing exceptions
 3. **Complex type inference**: Start with `int` for arithmetic, `string` for strings, expand as needed
 

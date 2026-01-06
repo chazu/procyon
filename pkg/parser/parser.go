@@ -120,6 +120,17 @@ type BlockExpr struct {
 
 func (BlockExpr) exprNode() {}
 
+// MessageSend represents: @ receiver selector or @ receiver key1: arg1 key2: arg2
+type MessageSend struct {
+	Receiver Expr     // self, identifier, or other expression
+	Selector string   // "increment", "setValue_", "at_put_"
+	Args     []Expr   // arguments for keyword messages
+	IsSelf   bool     // true if receiver is "self"
+}
+
+func (MessageSend) exprNode() {}
+func (MessageSend) stmtNode() {}
+
 // MethodBody represents a parsed method body
 type MethodBody struct {
 	LocalVars  []string
@@ -486,7 +497,8 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return nil, fmt.Errorf("subshell expressions not supported")
 
 	case ast.TokenAt:
-		return nil, fmt.Errorf("message sends not yet supported")
+		p.advance() // consume @
+		return p.parseMessageSend()
 
 	case ast.TokenNewline:
 		// End of expression
@@ -494,6 +506,124 @@ func (p *Parser) parsePrimary() (Expr, error) {
 
 	default:
 		return nil, fmt.Errorf("unexpected token: %s (%s)", tok.Type, tok.Value)
+	}
+}
+
+// parseMessageSend parses: receiver selector or receiver key1: arg1 key2: arg2
+// Called after @ has been consumed
+func (p *Parser) parseMessageSend() (Expr, error) {
+	// Parse receiver (must be an identifier for now)
+	if p.peek().Type != ast.TokenIdentifier {
+		return nil, fmt.Errorf("expected receiver identifier after @, got %s", p.peek().Type)
+	}
+
+	receiverName := p.peek().Value
+	p.advance() // consume receiver
+
+	isSelf := receiverName == "self"
+	var receiver Expr = &Identifier{Name: receiverName}
+
+	// Check what follows - unary or keyword message?
+	if p.atEnd() || p.peek().Type == ast.TokenNewline || p.peek().Type == ast.TokenRBracket {
+		return nil, fmt.Errorf("expected selector after receiver")
+	}
+
+	// If next token is a plain identifier, it's a unary message: @ self increment
+	if p.peek().Type == ast.TokenIdentifier {
+		selector := p.peek().Value
+		p.advance() // consume selector
+		return &MessageSend{
+			Receiver: receiver,
+			Selector: selector,
+			Args:     nil,
+			IsSelf:   isSelf,
+		}, nil
+	}
+
+	// If next token is a keyword, it's a keyword message: @ self setValue: 42
+	if p.peek().Type == ast.TokenKeyword {
+		return p.parseKeywordMessage(receiver, isSelf)
+	}
+
+	return nil, fmt.Errorf("expected selector or keyword after receiver, got %s", p.peek().Type)
+}
+
+// parseKeywordMessage parses: key1: arg1 key2: arg2 ...
+// Returns a MessageSend with combined selector (e.g., "at_put_") and args
+func (p *Parser) parseKeywordMessage(receiver Expr, isSelf bool) (Expr, error) {
+	var selectorParts []string
+	var args []Expr
+
+	for !p.atEnd() && p.peek().Type == ast.TokenKeyword {
+		keyword := p.peek().Value
+		p.advance() // consume keyword
+
+		// Convert "setValue:" to "setValue_"
+		// Remove trailing colon and add underscore
+		if len(keyword) > 0 && keyword[len(keyword)-1] == ':' {
+			keyword = keyword[:len(keyword)-1] + "_"
+		}
+		selectorParts = append(selectorParts, keyword)
+
+		// Parse the argument expression
+		arg, err := p.parseMessageArg()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+	}
+
+	// Combine selector parts: ["at_", "put_"] -> "at_put_"
+	selector := ""
+	for _, part := range selectorParts {
+		selector += part
+	}
+
+	return &MessageSend{
+		Receiver: receiver,
+		Selector: selector,
+		Args:     args,
+		IsSelf:   isSelf,
+	}, nil
+}
+
+// parseMessageArg parses a single argument to a keyword message
+// This is simpler than full expression parsing - just primary expressions
+func (p *Parser) parseMessageArg() (Expr, error) {
+	tok := p.peek()
+
+	switch tok.Type {
+	case ast.TokenNumber:
+		p.advance()
+		return &NumberLit{Value: tok.Value}, nil
+
+	case ast.TokenIdentifier:
+		p.advance()
+		return &Identifier{Name: tok.Value}, nil
+
+	case ast.TokenDString, ast.TokenSString:
+		p.advance()
+		val := tok.Value
+		if len(val) >= 2 {
+			val = val[1 : len(val)-1]
+		}
+		return &StringLit{Value: val}, nil
+
+	case ast.TokenLParen:
+		// Parenthesized expression
+		p.advance() // consume (
+		expr, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if p.peek().Type != ast.TokenRParen {
+			return nil, fmt.Errorf("expected ) in message argument, got %s", p.peek().Type)
+		}
+		p.advance() // consume )
+		return expr, nil
+
+	default:
+		return nil, fmt.Errorf("unexpected token in message argument: %s (%s)", tok.Type, tok.Value)
 	}
 }
 

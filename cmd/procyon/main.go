@@ -16,9 +16,10 @@ var (
 	strict  = flag.Bool("strict", false, "fail on unsupported constructs instead of warning")
 	dryRun  = flag.Bool("dry-run", false, "show what would be generated without outputting")
 	version = flag.Bool("version", false, "print version and exit")
+	mode    = flag.String("mode", "binary", "output mode: binary (standalone) or plugin (c-shared library)")
 )
 
-const versionStr = "0.2.0"
+const versionStr = "0.6.0"
 
 func main() {
 	flag.Usage = func() {
@@ -57,8 +58,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Generate code
-	result := codegen.Generate(class)
+	// Generate code based on mode
+	var result *codegen.Result
+	switch *mode {
+	case "binary":
+		result = codegen.Generate(class)
+	case "plugin":
+		result = codegen.GeneratePlugin(class)
+	default:
+		fmt.Fprintf(os.Stderr, "Error: unknown mode %q (use 'binary' or 'plugin')\n", *mode)
+		os.Exit(1)
+	}
 
 	// Report skipped methods
 	if len(result.SkippedMethods) > 0 {

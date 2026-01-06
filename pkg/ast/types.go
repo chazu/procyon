@@ -6,6 +6,8 @@ type Class struct {
 	Type               string        `json:"type"`
 	Name               string        `json:"name"`
 	Parent             string        `json:"parent"`
+	Package            string        `json:"package"`       // Namespace: "MyApp" or ""
+	Imports            []string      `json:"imports"`       // Imported packages
 	IsTrait            bool          `json:"isTrait"`
 	Location           Location      `json:"location"`
 	InstanceVars       []InstanceVar `json:"instanceVars"`
@@ -16,6 +18,29 @@ type Class struct {
 	Methods            []Method      `json:"methods"`
 	Aliases            []Alias       `json:"aliases"`
 	Advice             []Advice      `json:"advice"`
+}
+
+// QualifiedName returns the fully qualified name of the class.
+// Returns "MyApp::Counter" for namespaced, "Counter" for non-namespaced.
+func (c *Class) QualifiedName() string {
+	if c.Package != "" {
+		return c.Package + "::" + c.Name
+	}
+	return c.Name
+}
+
+// CompiledName returns the name for the compiled binary.
+// Returns "MyApp__Counter" for namespaced, "Counter" for non-namespaced.
+func (c *Class) CompiledName() string {
+	if c.Package != "" {
+		return c.Package + "__" + c.Name
+	}
+	return c.Name
+}
+
+// IsNamespaced returns true if the class belongs to a package.
+func (c *Class) IsNamespaced() bool {
+	return c.Package != ""
 }
 
 // Location represents a position in the source file.

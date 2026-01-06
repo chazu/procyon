@@ -61,12 +61,20 @@ type compiledMethod struct {
 func (g *generator) generate() *Result {
 	f := jen.NewFile("main")
 
+	// Note if class has traits (they fall back to Bash for now)
+	if len(g.class.Traits) > 0 {
+		g.warnings = append(g.warnings,
+			fmt.Sprintf("class includes %d trait(s): %v - trait methods fall back to Bash",
+				len(g.class.Traits), g.class.Traits))
+	}
+
 	// Add blank imports for embed and sqlite3
 	f.Anon("embed")
 	f.Anon("github.com/mattn/go-sqlite3")
 
 	// Embed directive and source hash
-	f.Comment("//go:embed " + g.class.Name + ".trash")
+	// Use CompiledName for namespaced classes (MyApp__Counter.trash)
+	f.Comment("//go:embed " + g.class.CompiledName() + ".trash")
 	f.Var().Id("_sourceCode").String()
 	f.Line()
 	f.Var().Id("_contentHash").String()
@@ -95,9 +103,23 @@ func (g *generator) generate() *Result {
 	g.generateHelpers(f)
 	f.Line()
 
-	// Compile methods and generate dispatch
+	// Compile methods and separate into class/instance
 	compiled := g.compileMethods()
-	g.generateDispatch(f, compiled)
+
+	// Split into class and instance methods
+	var instanceMethods, classMethods []*compiledMethod
+	for _, m := range compiled {
+		if m.isClass {
+			classMethods = append(classMethods, m)
+		} else {
+			instanceMethods = append(instanceMethods, m)
+		}
+	}
+
+	// Generate dispatch functions
+	g.generateDispatch(f, instanceMethods)
+	f.Line()
+	g.generateClassDispatch(f, classMethods)
 	f.Line()
 
 	// Generate method implementations
@@ -147,13 +169,23 @@ func (g *generator) inferType(iv ast.InstanceVar) *jen.Statement {
 
 func (g *generator) generateMain(f *jen.File) {
 	className := g.class.Name
+	compiledName := g.class.CompiledName()
+	qualifiedName := g.class.QualifiedName()
+
+	// Build --info format string based on whether class is namespaced
+	var infoFormat string
+	if g.class.IsNamespaced() {
+		infoFormat = "Class: " + qualifiedName + "\nPackage: " + g.class.Package + "\nHash: %s\nSource length: %d bytes\n"
+	} else {
+		infoFormat = "Class: " + className + "\nHash: %s\nSource length: %d bytes\n"
+	}
 
 	f.Func().Id("main").Params().Block(
 		// Check for minimum args
 		jen.If(jen.Len(jen.Qual("os", "Args")).Op("<").Lit(2)).Block(
-			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Lit("Usage: "+className+".native <instance_id> <selector> [args...]")),
-			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Lit("       "+className+".native --source")),
-			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Lit("       "+className+".native --hash")),
+			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Lit("Usage: "+compiledName+".native <instance_id> <selector> [args...]")),
+			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Lit("       "+compiledName+".native --source")),
+			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Lit("       "+compiledName+".native --hash")),
 			jen.Qual("os", "Exit").Call(jen.Lit(1)),
 		),
 		jen.Line(),
@@ -169,7 +201,7 @@ func (g *generator) generateMain(f *jen.File) {
 				jen.Return(),
 			),
 			jen.Case(jen.Lit("--info")).Block(
-				jen.Qual("fmt", "Printf").Call(jen.Lit("Class: "+className+"\nHash: %s\nSource length: %d bytes\n"), jen.Id("_contentHash"), jen.Len(jen.Id("_sourceCode"))),
+				jen.Qual("fmt", "Printf").Call(jen.Lit(infoFormat), jen.Id("_contentHash"), jen.Len(jen.Id("_sourceCode"))),
 				jen.Return(),
 			),
 		),
@@ -177,7 +209,7 @@ func (g *generator) generateMain(f *jen.File) {
 
 		// Check for selector arg
 		jen.If(jen.Len(jen.Qual("os", "Args")).Op("<").Lit(3)).Block(
-			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Lit("Usage: "+className+".native <instance_id> <selector> [args...]")),
+			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Lit("Usage: "+compiledName+".native <instance_id> <selector> [args...]")),
 			jen.Qual("os", "Exit").Call(jen.Lit(1)),
 		),
 		jen.Line(),
@@ -188,7 +220,24 @@ func (g *generator) generateMain(f *jen.File) {
 		jen.Id("args").Op(":=").Qual("os", "Args").Index(jen.Lit(3).Op(":")),
 		jen.Line(),
 
-		// Open database
+		// Check for class method call (receiver is the class name)
+		jen.If(jen.Id("receiver").Op("==").Lit(className).Op("||").Id("receiver").Op("==").Lit(qualifiedName)).Block(
+			jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatchClass").Call(jen.Id("selector"), jen.Id("args")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.If(jen.Qual("errors", "Is").Call(jen.Err(), jen.Id("ErrUnknownSelector"))).Block(
+					jen.Qual("os", "Exit").Call(jen.Lit(200)),
+				),
+				jen.Qual("fmt", "Fprintf").Call(jen.Qual("os", "Stderr"), jen.Lit("Error: %v\n"), jen.Err()),
+				jen.Qual("os", "Exit").Call(jen.Lit(1)),
+			),
+			jen.If(jen.Id("result").Op("!=").Lit("")).Block(
+				jen.Qual("fmt", "Println").Call(jen.Id("result")),
+			),
+			jen.Return(),
+		),
+		jen.Line(),
+
+		// Instance method call - open database
 		jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.Qual("fmt", "Fprintf").Call(jen.Qual("os", "Stderr"), jen.Lit("Error opening database: %v\n"), jen.Err()),
@@ -204,7 +253,7 @@ func (g *generator) generateMain(f *jen.File) {
 		),
 		jen.Line(),
 
-		// Dispatch
+		// Dispatch to instance method
 		jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatch").Call(jen.Id("instance"), jen.Id("selector"), jen.Id("args")),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.If(jen.Qual("errors", "Is").Call(jen.Err(), jen.Id("ErrUnknownSelector"))).Block(
@@ -274,21 +323,38 @@ func (g *generator) generateHelpers(f *jen.File) {
 		jen.List(jen.Id("_"), jen.Err()).Op("=").Id("db").Dot("Exec").Call(jen.Lit("INSERT OR REPLACE INTO instances (id, data) VALUES (?, json(?))"), jen.Id("id"), jen.String().Parens(jen.Id("data"))),
 		jen.Return(jen.Err()),
 	)
+	f.Line()
+
+	// sendMessage - shell out to bash runtime for non-self message sends
+	f.Func().Id("sendMessage").Params(
+		jen.Id("receiver").Interface(),
+		jen.Id("selector").String(),
+		jen.Id("args").Op("...").Interface(),
+	).Parens(jen.List(jen.String(), jen.Error())).Block(
+		// Convert receiver to string
+		jen.Id("receiverStr").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("receiver")),
+		// Build command args: @ receiver selector args...
+		jen.Id("cmdArgs").Op(":=").Index().String().Values(jen.Id("receiverStr"), jen.Id("selector")),
+		jen.For(jen.List(jen.Id("_"), jen.Id("arg")).Op(":=").Range().Id("args")).Block(
+			jen.Id("cmdArgs").Op("=").Append(jen.Id("cmdArgs"), jen.Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("arg"))),
+		),
+		// Find the trashtalk dispatch script
+		jen.List(jen.Id("home"), jen.Id("_")).Op(":=").Qual("os", "UserHomeDir").Call(),
+		jen.Id("dispatchScript").Op(":=").Qual("path/filepath", "Join").Call(jen.Id("home"), jen.Lit(".trashtalk"), jen.Lit("bin"), jen.Lit("trash-send")),
+		// Execute: trash-send receiver selector args...
+		jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Id("dispatchScript"), jen.Id("cmdArgs").Op("...")),
+		jen.List(jen.Id("output"), jen.Err()).Op(":=").Id("cmd").Dot("Output").Call(),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Err()),
+		),
+		jen.Return(jen.Qual("strings", "TrimSpace").Call(jen.String().Parens(jen.Id("output"))), jen.Nil()),
+	)
 }
 
 func (g *generator) compileMethods() []*compiledMethod {
 	var compiled []*compiledMethod
 
 	for _, m := range g.class.Methods {
-		// Skip class methods for now
-		if m.Kind == "class" {
-			g.skipped = append(g.skipped, SkippedMethod{
-				Selector: m.Selector,
-				Reason:   "class methods not yet supported",
-			})
-			continue
-		}
-
 		// Skip raw methods
 		if m.Raw {
 			g.skipped = append(g.skipped, SkippedMethod{
@@ -393,8 +459,72 @@ func (g *generator) generateDispatch(f *jen.File, methods []*compiledMethod) {
 	)
 }
 
+func (g *generator) generateClassDispatch(f *jen.File, methods []*compiledMethod) {
+	cases := []jen.Code{}
+	for _, m := range methods {
+		var callExpr *jen.Statement
+		if len(m.args) > 0 {
+			// Check args length
+			argCheck := jen.If(jen.Len(jen.Id("args")).Op("<").Lit(len(m.args))).Block(
+				jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit(m.selector+" requires "+fmt.Sprintf("%d", len(m.args))+" argument"))),
+			)
+
+			// Build call with args - class methods are package-level functions
+			callArgs := []jen.Code{}
+			for i := range m.args {
+				callArgs = append(callArgs, jen.Id("args").Index(jen.Lit(i)))
+			}
+			callExpr = jen.Id(m.goName).Call(callArgs...)
+
+			if m.returnsErr {
+				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+					argCheck,
+					jen.Return(callExpr),
+				))
+			} else {
+				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+					argCheck,
+					jen.Return(callExpr, jen.Nil()),
+				))
+			}
+		} else {
+			// No args - direct call to package-level function
+			callExpr = jen.Id(m.goName).Call()
+			if m.hasReturn {
+				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+					jen.Return(callExpr, jen.Nil()),
+				))
+			} else {
+				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+					callExpr,
+					jen.Return(jen.Lit(""), jen.Nil()),
+				))
+			}
+		}
+	}
+
+	// Default case
+	cases = append(cases, jen.Default().Block(
+		jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("%w: %s"), jen.Id("ErrUnknownSelector"), jen.Id("selector"))),
+	))
+
+	// dispatchClass takes no instance receiver
+	f.Func().Id("dispatchClass").Params(
+		jen.Id("selector").String(),
+		jen.Id("args").Index().String(),
+	).Parens(jen.List(jen.String(), jen.Error())).Block(
+		jen.Switch(jen.Id("selector")).Block(cases...),
+	)
+}
+
 func (g *generator) generateMethod(f *jen.File, m *compiledMethod) {
 	className := g.class.Name
+
+	// Special handling for Environment class - generate SQLite-based storage methods
+	if g.class.Name == "Environment" && m.isClass {
+		g.generateEnvironmentMethod(f, m)
+		return
+	}
 
 	// Build parameter list
 	params := []jen.Code{}
@@ -413,10 +543,20 @@ func (g *generator) generateMethod(f *jen.File, m *compiledMethod) {
 	// Generate body
 	body := g.generateMethodBody(m)
 
-	if returnType != nil {
-		f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(params...).Add(returnType).Block(body...)
+	if m.isClass {
+		// Class methods are package-level functions (no receiver)
+		if returnType != nil {
+			f.Func().Id(m.goName).Params(params...).Add(returnType).Block(body...)
+		} else {
+			f.Func().Id(m.goName).Params(params...).Block(body...)
+		}
 	} else {
-		f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(params...).Block(body...)
+		// Instance methods have receiver
+		if returnType != nil {
+			f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(params...).Add(returnType).Block(body...)
+		} else {
+			f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(params...).Block(body...)
+		}
 	}
 	f.Line()
 }
@@ -425,13 +565,16 @@ func (g *generator) generateMethodBody(m *compiledMethod) []jen.Code {
 	var stmts []jen.Code
 
 	// Convert string args to int if needed
+	// We use argName + "Int" to avoid shadowing the original parameter
+	// Also add _ = xInt to suppress "declared and not used" if arg is only passed to other methods
 	for _, arg := range m.args {
-		localVar := arg[0:1] // First letter as variable name (simple approach)
+		intVar := arg + "Int"
 		stmts = append(stmts,
-			jen.List(jen.Id(localVar), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id(arg)),
+			jen.List(jen.Id(intVar), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id(arg)),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
 			),
+			jen.Id("_").Op("=").Id(intVar), // Suppress unused warning
 		)
 	}
 
@@ -466,6 +609,17 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 
 	case *parser.Return:
 		expr := g.generateExpr(s.Value, m)
+		// Check if the return value is already a string (message sends, string literals)
+		_, isMessageSend := s.Value.(*parser.MessageSend)
+		_, isStringLit := s.Value.(*parser.StringLit)
+		if isMessageSend || isStringLit {
+			// Already a string, no conversion needed
+			if m.returnsErr {
+				return []jen.Code{jen.Return(expr, jen.Nil())}
+			}
+			return []jen.Code{jen.Return(expr)}
+		}
+		// Numeric values need conversion
 		if m.returnsErr {
 			return []jen.Code{jen.Return(jen.Qual("strconv", "Itoa").Call(expr), jen.Nil())}
 		}
@@ -566,10 +720,10 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 		if g.instanceVars[name] {
 			return jen.Id("c").Dot(capitalize(name))
 		}
-		// Check if it's a method arg (use converted local var)
+		// Check if it's a method arg (use converted int var)
 		for _, arg := range m.args {
 			if arg == name {
-				return jen.Id(name[0:1]) // Use first letter as converted var
+				return jen.Id(name + "Int") // Use argName + "Int" for converted int
 			}
 		}
 		return jen.Id(name)
@@ -579,6 +733,53 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 
 	case *parser.StringLit:
 		return jen.Lit(e.Value)
+
+	case *parser.MessageSend:
+		if e.IsSelf {
+			// Self send: direct Go method call
+			goMethodName := selectorToGoName(e.Selector)
+			if len(e.Args) == 0 {
+				return jen.Id("c").Dot(goMethodName).Call()
+			}
+			// Build args - Go methods take string params
+			args := []jen.Code{}
+			for _, arg := range e.Args {
+				// Check if the arg is a method parameter (already a string)
+				if ident, ok := arg.(*parser.Identifier); ok {
+					isMethodArg := false
+					for _, methodArg := range m.args {
+						if methodArg == ident.Name {
+							isMethodArg = true
+							break
+						}
+					}
+					if isMethodArg {
+						// Use original string parameter directly
+						args = append(args, jen.Id(ident.Name))
+						continue
+					}
+				}
+				// For other args, generate and convert if needed
+				argExpr := g.generateExpr(arg, m)
+				// Wrap numeric literals in strconv.Itoa
+				if _, ok := arg.(*parser.NumberLit); ok {
+					argExpr = jen.Qual("strconv", "Itoa").Call(argExpr)
+				}
+				args = append(args, argExpr)
+			}
+			return jen.Id("c").Dot(goMethodName).Call(args...)
+		}
+		// Non-self send: shell out to bash runtime
+		// Generate: sendMessage(receiver, selector, args...)
+		receiverExpr := g.generateExpr(e.Receiver, m)
+		args := []jen.Code{
+			receiverExpr,
+			jen.Lit(e.Selector),
+		}
+		for _, arg := range e.Args {
+			args = append(args, g.generateExpr(arg, m))
+		}
+		return jen.Id("sendMessage").Call(args...)
 
 	default:
 		return jen.Comment("unknown expr")
@@ -604,4 +805,175 @@ func mustAtoi(s string) int {
 	var n int
 	fmt.Sscanf(s, "%d", &n)
 	return n
+}
+
+// generateEnvironmentMethod generates specialized SQLite-based implementations
+// for the Environment class storage methods.
+func (g *generator) generateEnvironmentMethod(f *jen.File, m *compiledMethod) {
+	switch m.selector {
+	case "get_":
+		// Get(instanceId string) (string, error) - retrieve instance data
+		f.Func().Id("Get").Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Var().Id("data").String(),
+			jen.Err().Op("=").Id("db").Dot("QueryRow").Call(
+				jen.Lit("SELECT data FROM instances WHERE id = ?"),
+				jen.Id("instanceId"),
+			).Dot("Scan").Call(jen.Op("&").Id("data")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()), // Return empty string if not found
+			),
+			jen.Return(jen.Id("data"), jen.Nil()),
+		)
+
+	case "set_to_":
+		// Set_to(instanceId, data string) (string, error) - store instance data
+		f.Func().Id("Set_to").Params(
+			jen.Id("instanceId").String(),
+			jen.Id("data").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.List(jen.Id("_"), jen.Err()).Op("=").Id("db").Dot("Exec").Call(
+				jen.Lit("INSERT OR REPLACE INTO instances (id, data) VALUES (?, json(?))"),
+				jen.Id("instanceId"),
+				jen.Id("data"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("instanceId"), jen.Nil()),
+		)
+
+	case "delete_":
+		// Delete(instanceId string) (string, error) - remove instance
+		f.Func().Id("Delete").Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.List(jen.Id("_"), jen.Err()).Op("=").Id("db").Dot("Exec").Call(
+				jen.Lit("DELETE FROM instances WHERE id = ?"),
+				jen.Id("instanceId"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+
+	case "findByClass_":
+		// FindByClass(className string) (string, error) - find all instances of class
+		f.Func().Id("FindByClass").Params(jen.Id("className").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.List(jen.Id("rows"), jen.Err()).Op(":=").Id("db").Dot("Query").Call(
+				jen.Lit("SELECT id FROM instances WHERE class = ?"),
+				jen.Id("className"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("rows").Dot("Close").Call(),
+			jen.Line(),
+			jen.Var().Id("ids").Index().String(),
+			jen.For(jen.Id("rows").Dot("Next").Call()).Block(
+				jen.Var().Id("id").String(),
+				jen.If(jen.Err().Op(":=").Id("rows").Dot("Scan").Call(jen.Op("&").Id("id")).Op(";").Err().Op("==").Nil()).Block(
+					jen.Id("ids").Op("=").Append(jen.Id("ids"), jen.Id("id")),
+				),
+			),
+			jen.Return(jen.Qual("strings", "Join").Call(jen.Id("ids"), jen.Lit("\n")), jen.Nil()),
+		)
+
+	case "exists_":
+		// Exists(instanceId string) (string, error) - check if instance exists
+		f.Func().Id("Exists").Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Var().Id("exists").Int(),
+			jen.Err().Op("=").Id("db").Dot("QueryRow").Call(
+				jen.Lit("SELECT 1 FROM instances WHERE id = ?"),
+				jen.Id("instanceId"),
+			).Dot("Scan").Call(jen.Op("&").Id("exists")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("0"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("1"), jen.Nil()),
+		)
+
+	case "listAll":
+		// ListAll() string - get all instance IDs
+		f.Func().Id("ListAll").Params().String().Block(
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("")),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.List(jen.Id("rows"), jen.Err()).Op(":=").Id("db").Dot("Query").Call(
+				jen.Lit("SELECT id FROM instances"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("")),
+			),
+			jen.Defer().Id("rows").Dot("Close").Call(),
+			jen.Line(),
+			jen.Var().Id("ids").Index().String(),
+			jen.For(jen.Id("rows").Dot("Next").Call()).Block(
+				jen.Var().Id("id").String(),
+				jen.If(jen.Err().Op(":=").Id("rows").Dot("Scan").Call(jen.Op("&").Id("id")).Op(";").Err().Op("==").Nil()).Block(
+					jen.Id("ids").Op("=").Append(jen.Id("ids"), jen.Id("id")),
+				),
+			),
+			jen.Return(jen.Qual("strings", "Join").Call(jen.Id("ids"), jen.Lit("\n"))),
+		)
+
+	case "countByClass_":
+		// CountByClass(className string) (string, error) - count instances of class
+		f.Func().Id("CountByClass").Params(jen.Id("className").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Var().Id("count").Int(),
+			jen.Err().Op("=").Id("db").Dot("QueryRow").Call(
+				jen.Lit("SELECT COUNT(*) FROM instances WHERE class = ?"),
+				jen.Id("className"),
+			).Dot("Scan").Call(jen.Op("&").Id("count")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("0"), jen.Nil()),
+			),
+			jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Id("count")), jen.Nil()),
+		)
+
+	default:
+		// Unknown method - generate a stub
+		f.Comment("// " + m.selector + " - unknown Environment method")
+		f.Func().Id(m.goName).Params().String().Block(
+			jen.Return(jen.Lit("")),
+		)
+	}
+	f.Line()
 }

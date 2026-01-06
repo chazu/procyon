@@ -10,8 +10,10 @@ import (
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 //go:embed ControlFlowTest.trash
@@ -62,6 +64,21 @@ func main() {
 	receiver := os.Args[1]
 	selector := os.Args[2]
 	args := os.Args[3:]
+
+	if receiver == "ControlFlowTest" || receiver == "ControlFlowTest" {
+		result, err := dispatchClass(selector, args)
+		if err != nil {
+			if errors.Is(err, ErrUnknownSelector) {
+				os.Exit(200)
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if result != "" {
+			fmt.Println(result)
+		}
+		return
+	}
 
 	db, err := openDB()
 	if err != nil {
@@ -125,6 +142,22 @@ func saveInstance(db *sql.DB, id string, instance *ControlFlowTest) error {
 	return err
 }
 
+func sendMessage(receiver interface{}, selector string, args ...interface{}) (string, error) {
+	receiverStr := fmt.Sprintf("%v", receiver)
+	cmdArgs := []string{receiverStr, selector}
+	for _, arg := range args {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("%v", arg))
+	}
+	home, _ := os.UserHomeDir()
+	dispatchScript := filepath.Join(home, ".trashtalk", "bin", "trash-send")
+	cmd := exec.Command(dispatchScript, cmdArgs...)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
 func dispatch(c *ControlFlowTest, selector string, args []string) (string, error) {
 	switch selector {
 	case "testIfTrue":
@@ -133,6 +166,13 @@ func dispatch(c *ControlFlowTest, selector string, args []string) (string, error
 		return c.TestIfElse(), nil
 	case "testComparison":
 		return c.TestComparison(), nil
+	default:
+		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
+	}
+}
+
+func dispatchClass(selector string, args []string) (string, error) {
+	switch selector {
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
