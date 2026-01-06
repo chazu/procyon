@@ -190,7 +190,7 @@ func (g *generator) generateMain(f *jen.File) {
 		),
 		jen.Line(),
 
-		// Handle metadata commands
+		// Handle metadata commands and serve mode
 		jen.Switch(jen.Qual("os", "Args").Index(jen.Lit(1))).Block(
 			jen.Case(jen.Lit("--source")).Block(
 				jen.Qual("fmt", "Print").Call(jen.Id("_sourceCode")),
@@ -202,6 +202,10 @@ func (g *generator) generateMain(f *jen.File) {
 			),
 			jen.Case(jen.Lit("--info")).Block(
 				jen.Qual("fmt", "Printf").Call(jen.Lit(infoFormat), jen.Id("_contentHash"), jen.Len(jen.Id("_sourceCode"))),
+				jen.Return(),
+			),
+			jen.Case(jen.Lit("--serve")).Block(
+				jen.Id("runServeMode").Call(),
 				jen.Return(),
 			),
 		),
@@ -348,6 +352,151 @@ func (g *generator) generateHelpers(f *jen.File) {
 			jen.Return(jen.Lit(""), jen.Err()),
 		),
 		jen.Return(jen.Qual("strings", "TrimSpace").Call(jen.String().Parens(jen.Id("output"))), jen.Nil()),
+	)
+	f.Line()
+
+	// runServeMode - daemon mode that reads JSON requests from stdin
+	g.generateServeMode(f)
+}
+
+// generateServeMode generates the daemon loop that reads JSON from stdin
+func (g *generator) generateServeMode(f *jen.File) {
+	className := g.class.Name
+	qualifiedName := g.class.QualifiedName()
+
+	// Request/Response structs
+	f.Comment("// ServeRequest is the JSON request format for --serve mode")
+	f.Type().Id("ServeRequest").Struct(
+		jen.Id("Instance").String().Tag(map[string]string{"json": "instance"}),
+		jen.Id("Selector").String().Tag(map[string]string{"json": "selector"}),
+		jen.Id("Args").Index().String().Tag(map[string]string{"json": "args"}),
+	)
+	f.Line()
+
+	f.Comment("// ServeResponse is the JSON response format for --serve mode")
+	f.Type().Id("ServeResponse").Struct(
+		jen.Id("Instance").String().Tag(map[string]string{"json": "instance,omitempty"}),
+		jen.Id("Result").String().Tag(map[string]string{"json": "result,omitempty"}),
+		jen.Id("ExitCode").Int().Tag(map[string]string{"json": "exit_code"}),
+		jen.Id("Error").String().Tag(map[string]string{"json": "error,omitempty"}),
+	)
+	f.Line()
+
+	f.Func().Id("runServeMode").Params().Block(
+		// Open database once for all requests
+		jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Qual("fmt", "Fprintf").Call(jen.Qual("os", "Stderr"), jen.Lit("Error opening database: %v\n"), jen.Err()),
+			jen.Qual("os", "Exit").Call(jen.Lit(1)),
+		),
+		jen.Defer().Id("db").Dot("Close").Call(),
+		jen.Line(),
+
+		// Scanner for reading lines from stdin
+		jen.Id("scanner").Op(":=").Qual("bufio", "NewScanner").Call(jen.Qual("os", "Stdin")),
+		jen.Comment("// Increase buffer for large instance JSON"),
+		jen.Id("buf").Op(":=").Make(jen.Index().Byte(), jen.Lit(1024*1024)),
+		jen.Id("scanner").Dot("Buffer").Call(jen.Id("buf"), jen.Len(jen.Id("buf"))),
+		jen.Line(),
+
+		// Main loop
+		jen.For(jen.Id("scanner").Dot("Scan").Call()).Block(
+			jen.Id("line").Op(":=").Id("scanner").Dot("Text").Call(),
+			jen.If(jen.Id("line").Op("==").Lit("")).Block(jen.Continue()),
+			jen.Line(),
+
+			jen.Var().Id("req").Id("ServeRequest"),
+			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(jen.Id("line")),
+				jen.Op("&").Id("req"),
+			).Op(";").Err().Op("!=").Nil()).Block(
+				jen.Id("respond").Call(jen.Id("ServeResponse").Values(jen.Dict{
+					jen.Id("ExitCode"): jen.Lit(1),
+					jen.Id("Error"):    jen.Lit("invalid JSON: ").Op("+").Err().Dot("Error").Call(),
+				})),
+				jen.Continue(),
+			),
+			jen.Line(),
+
+			jen.Id("resp").Op(":=").Id("handleServeRequest").Call(jen.Id("db"), jen.Op("&").Id("req")),
+			jen.Id("respond").Call(jen.Id("resp")),
+		),
+	)
+	f.Line()
+
+	// respond helper
+	f.Func().Id("respond").Params(jen.Id("resp").Id("ServeResponse")).Block(
+		jen.List(jen.Id("out"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("resp")),
+		jen.Qual("fmt", "Println").Call(jen.String().Parens(jen.Id("out"))),
+	)
+	f.Line()
+
+	// handleServeRequest - dispatch a single request
+	f.Func().Id("handleServeRequest").Params(
+		jen.Id("db").Op("*").Qual("database/sql", "DB"),
+		jen.Id("req").Op("*").Id("ServeRequest"),
+	).Id("ServeResponse").Block(
+		// Check for class method call (empty instance or class name)
+		jen.If(jen.Id("req").Dot("Instance").Op("==").Lit("").Op("||").
+			Id("req").Dot("Instance").Op("==").Lit(className).Op("||").
+			Id("req").Dot("Instance").Op("==").Lit(qualifiedName)).Block(
+			jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatchClass").Call(
+				jen.Id("req").Dot("Selector"),
+				jen.Id("req").Dot("Args"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.If(jen.Qual("errors", "Is").Call(jen.Err(), jen.Id("ErrUnknownSelector"))).Block(
+					jen.Return(jen.Id("ServeResponse").Values(jen.Dict{jen.Id("ExitCode"): jen.Lit(200)})),
+				),
+				jen.Return(jen.Id("ServeResponse").Values(jen.Dict{
+					jen.Id("ExitCode"): jen.Lit(1),
+					jen.Id("Error"):    jen.Err().Dot("Error").Call(),
+				})),
+			),
+			jen.Return(jen.Id("ServeResponse").Values(jen.Dict{
+				jen.Id("Result"):   jen.Id("result"),
+				jen.Id("ExitCode"): jen.Lit(0),
+			})),
+		),
+		jen.Line(),
+
+		// Instance method - parse instance from JSON
+		jen.Var().Id("instance").Id(className),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("req").Dot("Instance")),
+			jen.Op("&").Id("instance"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Id("ServeResponse").Values(jen.Dict{
+				jen.Id("ExitCode"): jen.Lit(1),
+				jen.Id("Error"):    jen.Lit("invalid instance JSON: ").Op("+").Err().Dot("Error").Call(),
+			})),
+		),
+		jen.Line(),
+
+		// Dispatch to instance method
+		jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatch").Call(
+			jen.Op("&").Id("instance"),
+			jen.Id("req").Dot("Selector"),
+			jen.Id("req").Dot("Args"),
+		),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.If(jen.Qual("errors", "Is").Call(jen.Err(), jen.Id("ErrUnknownSelector"))).Block(
+				jen.Return(jen.Id("ServeResponse").Values(jen.Dict{jen.Id("ExitCode"): jen.Lit(200)})),
+			),
+			jen.Return(jen.Id("ServeResponse").Values(jen.Dict{
+				jen.Id("ExitCode"): jen.Lit(1),
+				jen.Id("Error"):    jen.Err().Dot("Error").Call(),
+			})),
+		),
+		jen.Line(),
+
+		// Return updated instance + result
+		jen.List(jen.Id("updatedJSON"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Op("&").Id("instance")),
+		jen.Return(jen.Id("ServeResponse").Values(jen.Dict{
+			jen.Id("Instance"): jen.String().Parens(jen.Id("updatedJSON")),
+			jen.Id("Result"):   jen.Id("result"),
+			jen.Id("ExitCode"): jen.Lit(0),
+		})),
 	)
 }
 
