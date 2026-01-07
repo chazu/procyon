@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed Counter.trash
+//go:embed Collection.trash
 var _sourceCode string
 
 var _contentHash string
@@ -31,19 +31,19 @@ func init() {
 
 var ErrUnknownSelector = errors.New("unknown selector")
 
-type Counter struct {
+type Collection struct {
 	Class     string   `json:"class"`
 	CreatedAt string   `json:"created_at"`
 	Vars      []string `json:"_vars"`
-	Value     string   `json:"value"`
-	Step      string   `json:"step"`
+	Items     string   `json:"items"`
+	Data      string   `json:"data"`
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
-		fmt.Fprintln(os.Stderr, "       Counter.native --source")
-		fmt.Fprintln(os.Stderr, "       Counter.native --hash")
+		fmt.Fprintln(os.Stderr, "Usage: Collection.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "       Collection.native --source")
+		fmt.Fprintln(os.Stderr, "       Collection.native --hash")
 		os.Exit(1)
 	}
 
@@ -55,7 +55,7 @@ func main() {
 		fmt.Println(_contentHash)
 		return
 	case "--info":
-		fmt.Printf("Class: Counter\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
+		fmt.Printf("Class: Collection\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
 		return
 	case "--serve":
 		runServeMode()
@@ -63,7 +63,7 @@ func main() {
 	}
 
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: Collection.native <instance_id> <selector> [args...]")
 		os.Exit(1)
 	}
 
@@ -71,7 +71,7 @@ func main() {
 	selector := os.Args[2]
 	args := os.Args[3:]
 
-	if receiver == "Counter" || receiver == "Counter" {
+	if receiver == "Collection" || receiver == "Collection" {
 		result, err := dispatchClass(selector, args)
 		if err != nil {
 			if errors.Is(err, ErrUnknownSelector) {
@@ -133,20 +133,20 @@ func openDB() (*sql.DB, error) {
 	return sql.Open("sqlite3", dbPath)
 }
 
-func loadInstance(db *sql.DB, id string) (*Counter, error) {
+func loadInstance(db *sql.DB, id string) (*Collection, error) {
 	var data string
 	err := db.QueryRow("SELECT data FROM instances WHERE id = ?", id).Scan(&data)
 	if err != nil {
 		return nil, err
 	}
-	var instance Counter
+	var instance Collection
 	if err := json.Unmarshal([]byte(data), &instance); err != nil {
 		return nil, err
 	}
 	return &instance, nil
 }
 
-func saveInstance(db *sql.DB, id string, instance *Counter) error {
+func saveInstance(db *sql.DB, id string, instance *Collection) error {
 	data, err := json.Marshal(instance)
 	if err != nil {
 		return err
@@ -160,7 +160,7 @@ func generateInstanceID(className string) string {
 	return strings.ToLower(className) + "_" + uuid
 }
 
-func createInstance(db *sql.DB, id string, instance *Counter) error {
+func createInstance(db *sql.DB, id string, instance *Collection) error {
 	data, err := json.Marshal(instance)
 	if err != nil {
 		return err
@@ -242,7 +242,7 @@ func respond(resp ServeResponse) {
 }
 
 func handleServeRequest(db *sql.DB, req *ServeRequest) ServeResponse {
-	if req.Instance == "" || req.Instance == "Counter" || req.Instance == "Counter" {
+	if req.Instance == "" || req.Instance == "Collection" || req.Instance == "Collection" {
 		result, err := dispatchClass(req.Selector, req.Args)
 		if err != nil {
 			if errors.Is(err, ErrUnknownSelector) {
@@ -259,7 +259,7 @@ func handleServeRequest(db *sql.DB, req *ServeRequest) ServeResponse {
 		}
 	}
 
-	var instance Counter
+	var instance Collection
 	if err := json.Unmarshal([]byte(req.Instance), &instance); err != nil {
 		return ServeResponse{
 			Error:    "invalid instance JSON: " + err.Error(),
@@ -603,40 +603,49 @@ func invokeBlock(blockID string, args ...interface{}) string {
 	return strings.TrimSpace(string(output))
 }
 
-func dispatch(c *Counter, instanceID string, selector string, args []string) (string, error) {
+func dispatch(c *Collection, instanceID string, selector string, args []string) (string, error) {
 	switch selector {
 	case "class":
-		return "Counter", nil
+		return "Collection", nil
 	case "id":
 		return instanceID, nil
 	case "delete":
 		return instanceID, nil
-	case "getValue":
-		return c.GetValue(), nil
-	case "getStep":
-		return c.GetStep(), nil
-	case "setValue_":
+	case "push_":
 		if len(args) < 1 {
-			return "", fmt.Errorf("setValue_ requires 1 argument")
+			return "", fmt.Errorf("push_ requires 1 argument")
 		}
-		return c.SetValue(args[0])
-	case "setStep_":
+		return c.Push(args[0])
+	case "at_":
 		if len(args) < 1 {
-			return "", fmt.Errorf("setStep_ requires 1 argument")
+			return "", fmt.Errorf("at_ requires 1 argument")
 		}
-		return c.SetStep(args[0])
-	case "increment":
-		return c.Increment(), nil
-	case "decrement":
-		return c.Decrement(), nil
-	case "incrementBy_":
+		return c.At(args[0])
+	case "size":
+		return c.Size(), nil
+	case "isEmpty":
+		return c.IsEmpty(), nil
+	case "first":
+		return c.First(), nil
+	case "last":
+		return c.Last(), nil
+	case "setData_to_":
+		if len(args) < 2 {
+			return "", fmt.Errorf("setData_to_ requires 2 argument")
+		}
+		return c.SetData_to(args[0], args[1])
+	case "getData_":
 		if len(args) < 1 {
-			return "", fmt.Errorf("incrementBy_ requires 1 argument")
+			return "", fmt.Errorf("getData_ requires 1 argument")
 		}
-		return c.IncrementBy(args[0])
-	case "reset":
-		c.Reset()
-		return "", nil
+		return c.GetData(args[0])
+	case "hasKey_":
+		if len(args) < 1 {
+			return "", fmt.Errorf("hasKey_ requires 1 argument")
+		}
+		return c.HasKey(args[0])
+	case "dataSize":
+		return c.DataSize(), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
@@ -645,12 +654,12 @@ func dispatch(c *Counter, instanceID string, selector string, args []string) (st
 func dispatchClass(selector string, args []string) (string, error) {
 	switch selector {
 	case "new":
-		id := generateInstanceID("Counter")
-		instance := &Counter{
-			Class:     "Counter",
+		id := generateInstanceID("Collection")
+		instance := &Collection{
+			Class:     "Collection",
 			CreatedAt: time.Now().Format(time.RFC3339),
-			Step:      "1",
-			Value:     "0",
+			Data:      "{}",
+			Items:     "[]",
 		}
 		db, err := openDB()
 		if err != nil {
@@ -661,71 +670,79 @@ func dispatchClass(selector string, args []string) (string, error) {
 			return "", err
 		}
 		return id, nil
-	case "description":
-		return Description(), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
 }
 
-func (c *Counter) GetValue() string {
-	return _toStr(toInt(c.Value) + toInt(0))
-}
-
-func (c *Counter) GetStep() string {
-	return _toStr(toInt(c.Step) + toInt(0))
-}
-
-func (c *Counter) SetValue(val string) (string, error) {
-	valInt, err := strconv.Atoi(val)
+func (c *Collection) Push(value string) (string, error) {
+	valueInt, err := strconv.Atoi(value)
 	if err != nil {
 		return "", err
 	}
-	_ = valInt
-	c.Value = strconv.Itoa(toInt(valInt) + toInt(0))
-	return "", nil
+	_ = valueInt
+	c.Items = _jsonArrayPush(c.Items, valueInt)
+	return _toStr(valueInt), nil
 }
 
-func (c *Counter) SetStep(val string) (string, error) {
-	valInt, err := strconv.Atoi(val)
+func (c *Collection) At(index string) (string, error) {
+	indexInt, err := strconv.Atoi(index)
 	if err != nil {
 		return "", err
 	}
-	_ = valInt
-	c.Step = strconv.Itoa(toInt(valInt) + toInt(0))
-	return "", nil
+	_ = indexInt
+	return _jsonArrayAt(c.Items, toInt(indexInt)), nil
 }
 
-func (c *Counter) Increment() string {
-	var newVal interface{}
-	newVal = toInt(c.Value) + toInt(c.Step)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return _toStr(toInt(newVal) + toInt(0))
+func (c *Collection) Size() string {
+	return strconv.Itoa(_jsonArrayLen(c.Items))
 }
 
-func (c *Counter) Decrement() string {
-	var newVal interface{}
-	newVal = toInt(c.Value) - toInt(c.Step)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return _toStr(toInt(newVal) + toInt(0))
+func (c *Collection) IsEmpty() string {
+	return _boolToString(_jsonArrayIsEmpty(c.Items))
 }
 
-func (c *Counter) IncrementBy(amount string) (string, error) {
-	amountInt, err := strconv.Atoi(amount)
+func (c *Collection) First() string {
+	return _jsonArrayFirst(c.Items)
+}
+
+func (c *Collection) Last() string {
+	return _jsonArrayLast(c.Items)
+}
+
+func (c *Collection) SetData_to(key string, value string) (string, error) {
+	keyInt, err := strconv.Atoi(key)
 	if err != nil {
 		return "", err
 	}
-	_ = amountInt
-	var newVal interface{}
-	newVal = toInt(c.Value) + toInt(amountInt)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return "", nil
+	_ = keyInt
+	valueInt, err := strconv.Atoi(value)
+	if err != nil {
+		return "", err
+	}
+	_ = valueInt
+	c.Data = _jsonObjectAtPut(c.Data, key, valueInt)
+	return _toStr(valueInt), nil
 }
 
-func (c *Counter) Reset() {
-	c.Value = strconv.Itoa(toInt(0) + toInt(0))
+func (c *Collection) GetData(key string) (string, error) {
+	keyInt, err := strconv.Atoi(key)
+	if err != nil {
+		return "", err
+	}
+	_ = keyInt
+	return _jsonObjectAt(c.Data, key), nil
 }
 
-func Description() string {
-	return "A simple counter"
+func (c *Collection) HasKey(key string) (string, error) {
+	keyInt, err := strconv.Atoi(key)
+	if err != nil {
+		return "", err
+	}
+	_ = keyInt
+	return _boolToString(_jsonObjectHasKey(c.Data, key)), nil
+}
+
+func (c *Collection) DataSize() string {
+	return strconv.Itoa(_jsonObjectLen(c.Data))
 }

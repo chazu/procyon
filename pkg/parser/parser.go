@@ -120,6 +120,59 @@ type BlockExpr struct {
 
 func (BlockExpr) exprNode() {}
 
+// IterationExpr represents: collection do: [:item | body]
+// This is a special pattern that generates a Go for loop
+type IterationExpr struct {
+	Collection Expr        // The collection to iterate over (e.g., "items")
+	IterVar    string      // The iteration variable name (e.g., "item")
+	Body       []Statement // The loop body
+	Kind       string      // "do", "collect", "select", etc.
+}
+
+func (IterationExpr) exprNode() {}
+func (IterationExpr) stmtNode() {}
+
+// DynamicIterationExpr represents: collection do: blockVar
+// When the block is a variable/parameter, not a literal
+// This requires shell-out to invoke the block at runtime
+type DynamicIterationExpr struct {
+	Collection Expr   // The collection to iterate over
+	BlockVar   Expr   // The block variable (identifier or expression)
+	Kind       string // "do", "collect", "select", etc.
+}
+
+func (DynamicIterationExpr) exprNode() {}
+func (DynamicIterationExpr) stmtNode() {}
+
+// IterationExprAsValue wraps IterationExpr for use in return statements
+// For example: ^ items collect: [:x | x * 2]
+type IterationExprAsValue struct {
+	Iteration *IterationExpr
+}
+
+func (IterationExprAsValue) exprNode() {}
+
+// DynamicIterationExprAsValue wraps DynamicIterationExpr for use in return statements
+// For example: ^ items collect: aBlock
+type DynamicIterationExprAsValue struct {
+	Iteration *DynamicIterationExpr
+}
+
+func (DynamicIterationExprAsValue) exprNode() {}
+
+// JSONPrimitiveExpr represents JSON primitive operations like:
+// items arrayPush: value
+// items arrayAt: index
+// items arrayLength
+// data objectAt: key
+type JSONPrimitiveExpr struct {
+	Receiver  Expr   // The receiver (e.g., "items", "data")
+	Operation string // "arrayPush", "arrayAt", "objectAt", etc.
+	Args      []Expr // Arguments for the operation
+}
+
+func (JSONPrimitiveExpr) exprNode() {}
+
 // MessageSend represents: @ receiver selector or @ receiver key1: arg1 key2: arg2
 type MessageSend struct {
 	Receiver Expr     // self, identifier, or other expression
@@ -202,7 +255,7 @@ func (p *Parser) parseLocalVars() ([]string, error) {
 		if p.peek().Type == ast.TokenIdentifier {
 			vars = append(vars, p.peek().Value)
 			p.advance()
-		} else if p.peek().Type == ast.TokenNewline {
+		} else if p.peek().Type == ast.TokenNewline || p.peek().Type == ast.TokenDot {
 			p.advance()
 		} else {
 			return nil, fmt.Errorf("expected identifier in local var declaration, got %s", p.peek().Type)
@@ -225,13 +278,55 @@ func (p *Parser) parseStatement() (Statement, error) {
 
 	tok := p.peek()
 
-	// Return statement: ^ expr
+	// Return statement: ^ expr (which may include iteration like ^ items collect: block)
 	if tok.Type == ast.TokenCaret {
 		p.advance()
 		expr, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
+		// Check for iteration keywords (^ items collect: block) or (^ items select: block)
+		if p.peek().Type == ast.TokenKeyword {
+			keyword := p.peek().Value
+			switch keyword {
+			case "do:":
+				stmt, err := p.parseDoIteration(expr)
+				if err != nil {
+					return nil, err
+				}
+				// For do:, still wrap in return (though do: doesn't produce a value)
+				if iter, ok := stmt.(*IterationExpr); ok {
+					return &Return{Value: &IterationExprAsValue{Iteration: iter}}, nil
+				}
+				if dyn, ok := stmt.(*DynamicIterationExpr); ok {
+					return &Return{Value: &DynamicIterationExprAsValue{Iteration: dyn}}, nil
+				}
+			case "collect:":
+				stmt, err := p.parseCollectIteration(expr)
+				if err != nil {
+					return nil, err
+				}
+				if iter, ok := stmt.(*IterationExpr); ok {
+					return &Return{Value: &IterationExprAsValue{Iteration: iter}}, nil
+				}
+				if dyn, ok := stmt.(*DynamicIterationExpr); ok {
+					return &Return{Value: &DynamicIterationExprAsValue{Iteration: dyn}}, nil
+				}
+			case "select:":
+				stmt, err := p.parseSelectIteration(expr)
+				if err != nil {
+					return nil, err
+				}
+				if iter, ok := stmt.(*IterationExpr); ok {
+					return &Return{Value: &IterationExprAsValue{Iteration: iter}}, nil
+				}
+				if dyn, ok := stmt.(*DynamicIterationExpr); ok {
+					return &Return{Value: &DynamicIterationExprAsValue{Iteration: dyn}}, nil
+				}
+			}
+		}
+
 		return &Return{Value: expr}, nil
 	}
 
@@ -266,6 +361,12 @@ func (p *Parser) parseStatement() (Statement, error) {
 			return p.parseIfFalse(expr)
 		case "whileTrue:":
 			return p.parseWhileTrue(expr)
+		case "do:":
+			return p.parseDoIteration(expr)
+		case "collect:":
+			return p.parseCollectIteration(expr)
+		case "select:":
+			return p.parseSelectIteration(expr)
 		}
 	}
 
@@ -332,7 +433,118 @@ func (p *Parser) parseWhileTrue(condition Expr) (Statement, error) {
 	}, nil
 }
 
-// parseBlock parses: [statements]
+// parseDoIteration parses: collection do: [:item | body] or collection do: blockVar
+func (p *Parser) parseDoIteration(collection Expr) (Statement, error) {
+	p.advance() // consume "do:"
+
+	// Check if we have a block literal or a variable
+	if p.peek().Type == ast.TokenLBracket {
+		// Block literal - inline the iteration
+		block, err := p.parseBlockExpr()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(block.Params) != 1 {
+			return nil, fmt.Errorf("do: block must have exactly one parameter, got %d", len(block.Params))
+		}
+
+		return &IterationExpr{
+			Collection: collection,
+			IterVar:    block.Params[0],
+			Body:       block.Statements,
+			Kind:       "do",
+		}, nil
+	}
+
+	// Block variable - dynamic iteration (Phase 2)
+	blockVar, err := p.parseMessageArg()
+	if err != nil {
+		return nil, err
+	}
+
+	return &DynamicIterationExpr{
+		Collection: collection,
+		BlockVar:   blockVar,
+		Kind:       "do",
+	}, nil
+}
+
+// parseCollectIteration parses: collection collect: [:item | expr] or collection collect: blockVar
+func (p *Parser) parseCollectIteration(collection Expr) (Statement, error) {
+	p.advance() // consume "collect:"
+
+	// Check if we have a block literal or a variable
+	if p.peek().Type == ast.TokenLBracket {
+		// Block literal - inline the iteration
+		block, err := p.parseBlockExpr()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(block.Params) != 1 {
+			return nil, fmt.Errorf("collect: block must have exactly one parameter, got %d", len(block.Params))
+		}
+
+		return &IterationExpr{
+			Collection: collection,
+			IterVar:    block.Params[0],
+			Body:       block.Statements,
+			Kind:       "collect",
+		}, nil
+	}
+
+	// Block variable - dynamic iteration (Phase 2)
+	blockVar, err := p.parseMessageArg()
+	if err != nil {
+		return nil, err
+	}
+
+	return &DynamicIterationExpr{
+		Collection: collection,
+		BlockVar:   blockVar,
+		Kind:       "collect",
+	}, nil
+}
+
+// parseSelectIteration parses: collection select: [:item | condition] or collection select: blockVar
+func (p *Parser) parseSelectIteration(collection Expr) (Statement, error) {
+	p.advance() // consume "select:"
+
+	// Check if we have a block literal or a variable
+	if p.peek().Type == ast.TokenLBracket {
+		// Block literal - inline the iteration
+		block, err := p.parseBlockExpr()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(block.Params) != 1 {
+			return nil, fmt.Errorf("select: block must have exactly one parameter, got %d", len(block.Params))
+		}
+
+		return &IterationExpr{
+			Collection: collection,
+			IterVar:    block.Params[0],
+			Body:       block.Statements,
+			Kind:       "select",
+		}, nil
+	}
+
+	// Block variable - dynamic iteration (Phase 2)
+	blockVar, err := p.parseMessageArg()
+	if err != nil {
+		return nil, err
+	}
+
+	return &DynamicIterationExpr{
+		Collection: collection,
+		BlockVar:   blockVar,
+		Kind:       "select",
+	}, nil
+}
+
+// parseBlock parses: [statements] (for control flow)
 func (p *Parser) parseBlock() ([]Statement, error) {
 	if p.peek().Type != ast.TokenLBracket {
 		return nil, fmt.Errorf("expected [ to start block, got %s", p.peek().Type)
@@ -363,6 +575,58 @@ func (p *Parser) parseBlock() ([]Statement, error) {
 	p.advance() // consume ]
 
 	return statements, nil
+}
+
+// parseBlockExpr parses a block literal: [:param1 :param2 | body] or [body]
+// Returns a BlockExpr with parameters and statements
+func (p *Parser) parseBlockExpr() (*BlockExpr, error) {
+	if p.peek().Type != ast.TokenLBracket {
+		return nil, fmt.Errorf("expected [ to start block, got %s", p.peek().Type)
+	}
+	p.advance() // consume [
+
+	var params []string
+	var statements []Statement
+
+	// Check for block parameters: [:param1 :param2 | ...]
+	for p.peek().Type == ast.TokenBlockParam {
+		params = append(params, p.peek().Value)
+		p.advance()
+	}
+
+	// If we had parameters, consume the |
+	if len(params) > 0 {
+		if p.peek().Type != ast.TokenPipe {
+			return nil, fmt.Errorf("expected | after block parameters, got %s", p.peek().Type)
+		}
+		p.advance() // consume |
+	}
+
+	// Parse statements until we hit ]
+	for !p.atEnd() && p.peek().Type != ast.TokenRBracket {
+		p.skipNewlines()
+		if p.peek().Type == ast.TokenRBracket {
+			break
+		}
+
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		if stmt != nil {
+			statements = append(statements, stmt)
+		}
+	}
+
+	if p.peek().Type != ast.TokenRBracket {
+		return nil, fmt.Errorf("expected ] to end block, got %s", p.peek().Type)
+	}
+	p.advance() // consume ]
+
+	return &BlockExpr{
+		Params:     params,
+		Statements: statements,
+	}, nil
 }
 
 func (p *Parser) parseExpr() (Expr, error) {
@@ -437,12 +701,23 @@ func (p *Parser) parseMulDiv() (Expr, error) {
 		return nil, err
 	}
 
+	// Check for JSON primitives after primary expression
+	left, err = p.parseJSONPrimitive(left)
+	if err != nil {
+		return nil, err
+	}
+
 	for !p.atEnd() {
 		tok := p.peek()
 		if tok.Type == ast.TokenStar || tok.Type == ast.TokenSlash {
 			op := tok.Value
 			p.advance()
 			right, err := p.parsePrimary()
+			if err != nil {
+				return nil, err
+			}
+			// Check for JSON primitives on right operand too
+			right, err = p.parseJSONPrimitive(right)
 			if err != nil {
 				return nil, err
 			}
@@ -453,6 +728,145 @@ func (p *Parser) parseMulDiv() (Expr, error) {
 	}
 
 	return left, nil
+}
+
+// isJSONPrimitiveUnary checks if the identifier is a unary JSON primitive
+func isJSONPrimitiveUnary(name string) bool {
+	switch name {
+	case "arrayLength", "arrayFirst", "arrayLast", "arrayIsEmpty",
+		"objectKeys", "objectValues", "objectLength", "objectIsEmpty":
+		return true
+	}
+	return false
+}
+
+// isUnaryMessage checks if the identifier is a known unary message
+// These are common Smalltalk-style messages that take no arguments
+func isUnaryMessage(name string) bool {
+	// Check for known unary messages
+	switch name {
+	case "notEmpty", "isEmpty", "isNil", "notNil", "class", "size",
+		"asString", "asNumber", "asArray", "first", "last", "hash":
+		return true
+	}
+	return false
+}
+
+// isJSONPrimitiveKeyword checks if the keyword is a JSON primitive keyword
+func isJSONPrimitiveKeyword(keyword string) (string, int, bool) {
+	// Returns: operation name, number of args, is valid
+	switch keyword {
+	case "arrayPush:":
+		return "arrayPush", 1, true
+	case "arrayAt:":
+		return "arrayAt", 1, true
+	case "arrayRemoveAt:":
+		return "arrayRemoveAt", 1, true
+	case "objectAt:":
+		return "objectAt", 1, true
+	case "objectHasKey:":
+		return "objectHasKey", 1, true
+	case "objectRemoveKey:":
+		return "objectRemoveKey", 1, true
+	}
+	return "", 0, false
+}
+
+// isJSONPrimitiveKeyword2 checks for two-arg JSON primitive keywords
+func isJSONPrimitiveKeyword2(keyword string) (string, bool) {
+	switch keyword {
+	case "arrayAt:":
+		return "arrayAtPut", true // Will be "arrayAt:put:" when we see "put:"
+	case "objectAt:":
+		return "objectAtPut", true // Will be "objectAt:put:" when we see "put:"
+	}
+	return "", false
+}
+
+// parseJSONPrimitive checks if the next token is a JSON primitive and parses it.
+// Also handles general unary messages like: result notEmpty
+// Supports chained primitives like: items arrayPush: x arrayPush: y
+func (p *Parser) parseJSONPrimitive(receiver Expr) (Expr, error) {
+	result := receiver
+
+	for {
+		// Check for unary JSON primitives (identifier without colon)
+		if p.peek().Type == ast.TokenIdentifier {
+			name := p.peek().Value
+			if isJSONPrimitiveUnary(name) {
+				p.advance() // consume the primitive name
+				result = &JSONPrimitiveExpr{
+					Receiver:  result,
+					Operation: name,
+					Args:      nil,
+				}
+				continue // Check for more primitives
+			}
+			// Check for general unary messages (lowercase identifier, not a keyword)
+			// Examples: notEmpty, isNil, class, etc.
+			if isUnaryMessage(name) {
+				p.advance() // consume the message name
+				result = &MessageSend{
+					Receiver: result,
+					Selector: name,
+					Args:     nil,
+					IsSelf:   false,
+				}
+				continue // Check for more messages
+			}
+		}
+
+		// Check for keyword JSON primitives (like "arrayPush:")
+		if p.peek().Type == ast.TokenKeyword {
+			keyword := p.peek().Value
+			if op, argCount, ok := isJSONPrimitiveKeyword(keyword); ok {
+				p.advance() // consume the keyword
+
+				// Parse the first argument
+				arg1, err := p.parseMessageArg()
+				if err != nil {
+					return nil, err
+				}
+
+				// Check for second keyword (like "put:" for "arrayAt:put:")
+				if p.peek().Type == ast.TokenKeyword && p.peek().Value == "put:" {
+					p.advance() // consume "put:"
+					arg2, err := p.parseMessageArg()
+					if err != nil {
+						return nil, err
+					}
+					// Adjust operation name for two-arg variants
+					if op == "arrayAt" {
+						op = "arrayAtPut"
+					} else if op == "objectAt" {
+						op = "objectAtPut"
+					}
+					result = &JSONPrimitiveExpr{
+						Receiver:  result,
+						Operation: op,
+						Args:      []Expr{arg1, arg2},
+					}
+					continue // Check for more primitives
+				}
+
+				args := []Expr{arg1}
+				// Handle single-arg case
+				if argCount == 1 {
+					result = &JSONPrimitiveExpr{
+						Receiver:  result,
+						Operation: op,
+						Args:      args,
+					}
+					continue // Check for more primitives
+				}
+			}
+		}
+
+		// No more JSON primitives, done
+		break
+	}
+
+	return result, nil
 }
 
 func (p *Parser) parsePrimary() (Expr, error) {
@@ -467,7 +881,7 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		p.advance()
 		return &Identifier{Name: tok.Value}, nil
 
-	case ast.TokenDString, ast.TokenSString:
+	case ast.TokenDString, ast.TokenSString, "STRING":
 		p.advance()
 		// Remove quotes from the value
 		val := tok.Value
@@ -500,7 +914,12 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		p.advance() // consume @
 		return p.parseMessageSend()
 
-	case ast.TokenNewline:
+	case ast.TokenLBracket:
+		// Block literal as expression: [condition] or [:param | body]
+		// Used for [condition] whileTrue: [body]
+		return p.parseBlockExpr()
+
+	case ast.TokenNewline, ast.TokenDot:
 		// End of expression
 		return nil, fmt.Errorf("unexpected end of expression")
 
@@ -524,7 +943,7 @@ func (p *Parser) parseMessageSend() (Expr, error) {
 	var receiver Expr = &Identifier{Name: receiverName}
 
 	// Check what follows - unary or keyword message?
-	if p.atEnd() || p.peek().Type == ast.TokenNewline || p.peek().Type == ast.TokenRBracket {
+	if p.atEnd() || p.peek().Type == ast.TokenNewline || p.peek().Type == ast.TokenDot || p.peek().Type == ast.TokenRBracket {
 		return nil, fmt.Errorf("expected selector after receiver")
 	}
 
@@ -601,7 +1020,7 @@ func (p *Parser) parseMessageArg() (Expr, error) {
 		p.advance()
 		return &Identifier{Name: tok.Value}, nil
 
-	case ast.TokenDString, ast.TokenSString:
+	case ast.TokenDString, ast.TokenSString, "STRING":
 		p.advance()
 		val := tok.Value
 		if len(val) >= 2 {
@@ -621,6 +1040,10 @@ func (p *Parser) parseMessageArg() (Expr, error) {
 		}
 		p.advance() // consume )
 		return expr, nil
+
+	case ast.TokenLBracket:
+		// Block expression: [:param | body] or [body]
+		return p.parseBlockExpr()
 
 	default:
 		return nil, fmt.Errorf("unexpected token in message argument: %s (%s)", tok.Type, tok.Value)
@@ -656,7 +1079,7 @@ func (p *Parser) atEnd() bool {
 }
 
 func (p *Parser) skipNewlines() {
-	for !p.atEnd() && p.peek().Type == ast.TokenNewline {
+	for !p.atEnd() && (p.peek().Type == ast.TokenNewline || p.peek().Type == ast.TokenDot) {
 		p.advance()
 	}
 }

@@ -49,13 +49,14 @@ type generator struct {
 }
 
 type compiledMethod struct {
-	selector   string
-	goName     string
-	args       []string
-	body       *parser.MethodBody
-	hasReturn  bool
-	isClass    bool
-	returnsErr bool
+	selector    string
+	goName      string
+	args        []string
+	body        *parser.MethodBody
+	hasReturn   bool
+	isClass     bool
+	returnsErr  bool
+	renamedVars map[string]string // Original name -> safe Go name
 }
 
 func (g *generator) generate() *Result {
@@ -101,6 +102,10 @@ func (g *generator) generate() *Result {
 
 	// Helper functions
 	g.generateHelpers(f)
+	f.Line()
+
+	// Type conversion helpers for iteration
+	g.generateTypeHelpers(f)
 	f.Line()
 
 	// Compile methods and separate into class/instance
@@ -161,10 +166,59 @@ func (g *generator) generateStruct(f *jen.File) {
 }
 
 func (g *generator) inferType(iv ast.InstanceVar) *jen.Statement {
-	if iv.Default.Type == "number" {
-		return jen.Int()
-	}
+	// Always use string type for instance variables to match bash/jq compiler behavior
+	// JSON arrays/objects are stored as JSON strings
 	return jen.String()
+}
+
+// isJSONArrayType checks if an instance variable has a JSON array type
+// Always returns false since we use string type for all instance variables
+func (g *generator) isJSONArrayType(name string) bool {
+	// With string-typed instance variables, we always use JSON string operations
+	return false
+}
+
+// isJSONObjectType checks if an instance variable has a JSON object type
+// Always returns false since we use string type for all instance variables
+func (g *generator) isJSONObjectType(name string) bool {
+	// With string-typed instance variables, we always use JSON string operations
+	return false
+}
+
+// exprResultsInArray checks if an expression results in a native []interface{}
+// This handles chained operations like: items arrayPush: x arrayPush: y
+func (g *generator) exprResultsInArray(expr parser.Expr) bool {
+	switch e := expr.(type) {
+	case *parser.Identifier:
+		return g.isJSONArrayType(e.Name)
+	case *parser.JSONPrimitiveExpr:
+		// If receiver results in array and operation preserves array type
+		if g.exprResultsInArray(e.Receiver) {
+			switch e.Operation {
+			case "arrayPush", "arrayAtPut", "arrayRemoveAt":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// exprResultsInObject checks if an expression results in a native map[string]interface{}
+// This handles chained operations like: data objectAt: k1 put: v1 objectAt: k2 put: v2
+func (g *generator) exprResultsInObject(expr parser.Expr) bool {
+	switch e := expr.(type) {
+	case *parser.Identifier:
+		return g.isJSONObjectType(e.Name)
+	case *parser.JSONPrimitiveExpr:
+		// If receiver results in object and operation preserves object type
+		if g.exprResultsInObject(e.Receiver) {
+			switch e.Operation {
+			case "objectAtPut", "objectRemoveKey":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (g *generator) generateMain(f *jen.File) {
@@ -257,8 +311,8 @@ func (g *generator) generateMain(f *jen.File) {
 		),
 		jen.Line(),
 
-		// Dispatch to instance method
-		jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatch").Call(jen.Id("instance"), jen.Id("selector"), jen.Id("args")),
+		// Dispatch to instance method (pass receiver as instanceID)
+		jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatch").Call(jen.Id("instance"), jen.Id("receiver"), jen.Id("selector"), jen.Id("args")),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.If(jen.Qual("errors", "Is").Call(jen.Err(), jen.Id("ErrUnknownSelector"))).Block(
 				jen.Qual("os", "Exit").Call(jen.Lit(200)),
@@ -268,10 +322,17 @@ func (g *generator) generateMain(f *jen.File) {
 		),
 		jen.Line(),
 
-		// Save instance
-		jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("receiver"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
-			jen.Qual("fmt", "Fprintf").Call(jen.Qual("os", "Stderr"), jen.Lit("Error saving instance: %v\n"), jen.Err()),
-			jen.Qual("os", "Exit").Call(jen.Lit(1)),
+		// Save or delete instance
+		jen.If(jen.Id("selector").Op("==").Lit("delete")).Block(
+			jen.If(jen.Err().Op(":=").Id("deleteInstance").Call(jen.Id("db"), jen.Id("receiver")), jen.Err().Op("!=").Nil()).Block(
+				jen.Qual("fmt", "Fprintf").Call(jen.Qual("os", "Stderr"), jen.Lit("Error deleting instance: %v\n"), jen.Err()),
+				jen.Qual("os", "Exit").Call(jen.Lit(1)),
+			),
+		).Else().Block(
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("receiver"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Qual("fmt", "Fprintf").Call(jen.Qual("os", "Stderr"), jen.Lit("Error saving instance: %v\n"), jen.Err()),
+				jen.Qual("os", "Exit").Call(jen.Lit(1)),
+			),
 		),
 		jen.Line(),
 
@@ -329,12 +390,52 @@ func (g *generator) generateHelpers(f *jen.File) {
 	)
 	f.Line()
 
+	// generateInstanceID - creates a UUID-based instance ID
+	f.Func().Id("generateInstanceID").Params(jen.Id("className").String()).String().Block(
+		jen.Id("uuid").Op(":=").Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+		jen.Return(jen.Qual("strings", "ToLower").Call(jen.Id("className")).Op("+").Lit("_").Op("+").Id("uuid")),
+	)
+	f.Line()
+
+	// createInstance - inserts a new instance into the database
+	f.Func().Id("createInstance").Params(
+		jen.Id("db").Op("*").Qual("database/sql", "DB"),
+		jen.Id("id").String(),
+		jen.Id("instance").Op("*").Id(className),
+	).Error().Block(
+		jen.List(jen.Id("data"), jen.Err()).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("instance")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Err()),
+		),
+		jen.List(jen.Id("_"), jen.Err()).Op("=").Id("db").Dot("Exec").Call(
+			jen.Lit("INSERT INTO instances (id, data) VALUES (?, json(?))"),
+			jen.Id("id"),
+			jen.String().Parens(jen.Id("data")),
+		),
+		jen.Return(jen.Err()),
+	)
+	f.Line()
+
+	// deleteInstance - removes an instance from the database
+	f.Func().Id("deleteInstance").Params(
+		jen.Id("db").Op("*").Qual("database/sql", "DB"),
+		jen.Id("id").String(),
+	).Error().Block(
+		jen.List(jen.Id("_"), jen.Err()).Op(":=").Id("db").Dot("Exec").Call(
+			jen.Lit("DELETE FROM instances WHERE id = ?"),
+			jen.Id("id"),
+		),
+		jen.Return(jen.Err()),
+	)
+	f.Line()
+
 	// sendMessage - shell out to bash runtime for non-self message sends
+	// Returns just string - errors are silently ignored to match bash behavior and simplify usage in expressions
 	f.Func().Id("sendMessage").Params(
 		jen.Id("receiver").Interface(),
 		jen.Id("selector").String(),
 		jen.Id("args").Op("...").Interface(),
-	).Parens(jen.List(jen.String(), jen.Error())).Block(
+	).String().Block(
 		// Convert receiver to string
 		jen.Id("receiverStr").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("receiver")),
 		// Build command args: @ receiver selector args...
@@ -347,16 +448,92 @@ func (g *generator) generateHelpers(f *jen.File) {
 		jen.Id("dispatchScript").Op(":=").Qual("path/filepath", "Join").Call(jen.Id("home"), jen.Lit(".trashtalk"), jen.Lit("bin"), jen.Lit("trash-send")),
 		// Execute: trash-send receiver selector args...
 		jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Id("dispatchScript"), jen.Id("cmdArgs").Op("...")),
-		jen.List(jen.Id("output"), jen.Err()).Op(":=").Id("cmd").Dot("Output").Call(),
-		jen.If(jen.Err().Op("!=").Nil()).Block(
-			jen.Return(jen.Lit(""), jen.Err()),
-		),
-		jen.Return(jen.Qual("strings", "TrimSpace").Call(jen.String().Parens(jen.Id("output"))), jen.Nil()),
+		jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+		jen.Return(jen.Qual("strings", "TrimSpace").Call(jen.String().Parens(jen.Id("output")))),
 	)
 	f.Line()
 
 	// runServeMode - daemon mode that reads JSON requests from stdin
 	g.generateServeMode(f)
+	f.Line()
+
+	// JSON primitive helper functions
+	g.generateJSONHelpers(f)
+}
+
+// generateTypeHelpers generates helper functions for type conversion in iteration blocks
+func (g *generator) generateTypeHelpers(f *jen.File) {
+	// toInt converts interface{} to int for arithmetic operations
+	f.Comment("// toInt converts interface{} to int for arithmetic in iteration blocks")
+	f.Func().Id("toInt").Params(jen.Id("v").Interface()).Int().Block(
+		jen.Switch(jen.Id("x").Op(":=").Id("v").Assert(jen.Type())).Block(
+			jen.Case(jen.Int()).Block(jen.Return(jen.Id("x"))),
+			jen.Case(jen.Int64()).Block(jen.Return(jen.Int().Parens(jen.Id("x")))),
+			jen.Case(jen.Float64()).Block(jen.Return(jen.Int().Parens(jen.Id("x")))),
+			jen.Case(jen.String()).Block(
+				jen.List(jen.Id("n"), jen.Id("_")).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("x")),
+				jen.Return(jen.Id("n")),
+			),
+			jen.Default().Block(jen.Return(jen.Lit(0))),
+		),
+	)
+	f.Line()
+
+	// toBool converts interface{} to bool for predicates
+	f.Comment("// toBool converts interface{} to bool for predicates in iteration blocks")
+	f.Func().Id("toBool").Params(jen.Id("v").Interface()).Bool().Block(
+		jen.Switch(jen.Id("x").Op(":=").Id("v").Assert(jen.Type())).Block(
+			jen.Case(jen.Bool()).Block(jen.Return(jen.Id("x"))),
+			jen.Case(jen.Int()).Block(jen.Return(jen.Id("x").Op("!=").Lit(0))),
+			jen.Case(jen.String()).Block(jen.Return(jen.Id("x").Op("!=").Lit(""))),
+			jen.Default().Block(jen.Return(jen.Id("v").Op("!=").Nil())),
+		),
+	)
+	f.Line()
+
+	// invokeBlock calls a Trashtalk block through the Bash runtime (Phase 2)
+	// Returns just string - errors are silently ignored to match bash behavior and simplify usage in expressions
+	f.Comment("// invokeBlock calls a Trashtalk block through the Bash runtime")
+	f.Comment("// blockID is the instance ID of the Block object")
+	f.Comment("// args are the values to pass to the block")
+	f.Func().Id("invokeBlock").Params(
+		jen.Id("blockID").String(),
+		jen.Id("args").Op("...").Interface(),
+	).String().Block(
+		// Build command based on arg count
+		jen.Var().Id("cmdStr").String(),
+		jen.Switch(jen.Len(jen.Id("args"))).Block(
+			jen.Case(jen.Lit(0)).Block(
+				jen.Id("cmdStr").Op("=").Qual("fmt", "Sprintf").Call(
+					jen.Lit("source ~/.trashtalk/lib/trash.bash && @ %q value"),
+					jen.Id("blockID"),
+				),
+			),
+			jen.Case(jen.Lit(1)).Block(
+				jen.Id("cmdStr").Op("=").Qual("fmt", "Sprintf").Call(
+					jen.Lit("source ~/.trashtalk/lib/trash.bash && @ %q valueWith: %q"),
+					jen.Id("blockID"),
+					jen.Qual("fmt", "Sprint").Call(jen.Id("args").Index(jen.Lit(0))),
+				),
+			),
+			jen.Case(jen.Lit(2)).Block(
+				jen.Id("cmdStr").Op("=").Qual("fmt", "Sprintf").Call(
+					jen.Lit("source ~/.trashtalk/lib/trash.bash && @ %q valueWith: %q and: %q"),
+					jen.Id("blockID"),
+					jen.Qual("fmt", "Sprint").Call(jen.Id("args").Index(jen.Lit(0))),
+					jen.Qual("fmt", "Sprint").Call(jen.Id("args").Index(jen.Lit(1))),
+				),
+			),
+			jen.Default().Block(
+				jen.Return(jen.Lit("")),
+			),
+		),
+		jen.Line(),
+		jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("cmdStr")),
+		jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+		jen.Return(jen.Qual("strings", "TrimSpace").Call(jen.String().Parens(jen.Id("output")))),
+	)
+	f.Line()
 }
 
 // generateServeMode generates the daemon loop that reads JSON from stdin
@@ -367,6 +544,7 @@ func (g *generator) generateServeMode(f *jen.File) {
 	// Request/Response structs
 	f.Comment("// ServeRequest is the JSON request format for --serve mode")
 	f.Type().Id("ServeRequest").Struct(
+		jen.Id("InstanceID").String().Tag(map[string]string{"json": "instance_id"}),
 		jen.Id("Instance").String().Tag(map[string]string{"json": "instance"}),
 		jen.Id("Selector").String().Tag(map[string]string{"json": "selector"}),
 		jen.Id("Args").Index().String().Tag(map[string]string{"json": "args"}),
@@ -473,9 +651,10 @@ func (g *generator) generateServeMode(f *jen.File) {
 		),
 		jen.Line(),
 
-		// Dispatch to instance method
+		// Dispatch to instance method (pass instance ID for primitives)
 		jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatch").Call(
 			jen.Op("&").Id("instance"),
+			jen.Id("req").Dot("InstanceID"),
 			jen.Id("req").Dot("Selector"),
 			jen.Id("req").Dot("Args"),
 		),
@@ -486,6 +665,21 @@ func (g *generator) generateServeMode(f *jen.File) {
 			jen.Return(jen.Id("ServeResponse").Values(jen.Dict{
 				jen.Id("ExitCode"): jen.Lit(1),
 				jen.Id("Error"):    jen.Err().Dot("Error").Call(),
+			})),
+		),
+		jen.Line(),
+
+		// Handle delete specially
+		jen.If(jen.Id("req").Dot("Selector").Op("==").Lit("delete")).Block(
+			jen.If(jen.Err().Op(":=").Id("deleteInstance").Call(jen.Id("db"), jen.Id("req").Dot("InstanceID")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Id("ServeResponse").Values(jen.Dict{
+					jen.Id("ExitCode"): jen.Lit(1),
+					jen.Id("Error"):    jen.Err().Dot("Error").Call(),
+				})),
+			),
+			jen.Return(jen.Id("ServeResponse").Values(jen.Dict{
+				jen.Id("Result"):   jen.Id("result"),
+				jen.Id("ExitCode"): jen.Lit(0),
 			})),
 		),
 		jen.Line(),
@@ -536,13 +730,14 @@ func (g *generator) compileMethods() []*compiledMethod {
 		returnsErr := len(m.Args) > 0
 
 		compiled = append(compiled, &compiledMethod{
-			selector:   m.Selector,
-			goName:     selectorToGoName(m.Selector),
-			args:       m.Args,
-			body:       result.Body,
-			hasReturn:  hasReturn,
-			isClass:    m.Kind == "class",
-			returnsErr: returnsErr,
+			selector:    m.Selector,
+			goName:      selectorToGoName(m.Selector),
+			args:        m.Args,
+			body:        result.Body,
+			hasReturn:   hasReturn,
+			isClass:     m.Kind == "class",
+			returnsErr:  returnsErr,
+			renamedVars: make(map[string]string),
 		})
 	}
 
@@ -551,8 +746,24 @@ func (g *generator) compileMethods() []*compiledMethod {
 
 func (g *generator) generateDispatch(f *jen.File, methods []*compiledMethod) {
 	className := g.class.Name
+	qualifiedName := g.class.QualifiedName()
 
-	cases := []jen.Code{}
+	// Built-in primitive cases for Object methods
+	cases := []jen.Code{
+		// class - returns the class name
+		jen.Case(jen.Lit("class")).Block(
+			jen.Return(jen.Lit(qualifiedName), jen.Nil()),
+		),
+		// id - returns the instance ID
+		jen.Case(jen.Lit("id")).Block(
+			jen.Return(jen.Id("instanceID"), jen.Nil()),
+		),
+		// delete - signals deletion (actual deletion handled by caller)
+		jen.Case(jen.Lit("delete")).Block(
+			jen.Return(jen.Id("instanceID"), jen.Nil()),
+		),
+	}
+
 	for _, m := range methods {
 		var callExpr *jen.Statement
 		if len(m.args) > 0 {
@@ -601,6 +812,7 @@ func (g *generator) generateDispatch(f *jen.File, methods []*compiledMethod) {
 
 	f.Func().Id("dispatch").Params(
 		jen.Id("c").Op("*").Id(className),
+		jen.Id("instanceID").String(),
 		jen.Id("selector").String(),
 		jen.Id("args").Index().String(),
 	).Parens(jen.List(jen.String(), jen.Error())).Block(
@@ -609,7 +821,38 @@ func (g *generator) generateDispatch(f *jen.File, methods []*compiledMethod) {
 }
 
 func (g *generator) generateClassDispatch(f *jen.File, methods []*compiledMethod) {
-	cases := []jen.Code{}
+	className := g.class.Name
+	qualifiedName := g.class.QualifiedName()
+
+	// Build struct initialization with default values for "new" primitive
+	structFields := jen.Dict{
+		jen.Id("Class"):     jen.Lit(qualifiedName),
+		jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+	}
+	for _, iv := range g.class.InstanceVars {
+		goName := capitalize(iv.Name)
+		val := iv.Default.Value
+		// All instance variables are strings (JSON representations for arrays/objects)
+		structFields[jen.Id(goName)] = jen.Lit(val)
+	}
+
+	// "new" primitive case - creates and persists a new instance
+	cases := []jen.Code{
+		jen.Case(jen.Lit("new")).Block(
+			jen.Id("id").Op(":=").Id("generateInstanceID").Call(jen.Lit(className)),
+			jen.Id("instance").Op(":=").Op("&").Id(className).Values(structFields),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.If(jen.Err().Op(":=").Id("createInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		),
+	}
+
 	for _, m := range methods {
 		var callExpr *jen.Statement
 		if len(m.args) > 0 {
@@ -727,9 +970,14 @@ func (g *generator) generateMethodBody(m *compiledMethod) []jen.Code {
 		)
 	}
 
-	// Local variables
+	// Local variables - rename if they conflict with Go builtins
+	// Use interface{} for dynamic typing (Trashtalk is dynamically typed)
 	for _, v := range m.body.LocalVars {
-		stmts = append(stmts, jen.Var().Id(v).Int())
+		safeName := safeGoName(v)
+		if safeName != v {
+			m.renamedVars[v] = safeName
+		}
+		stmts = append(stmts, jen.Var().Id(safeName).Interface())
 	}
 
 	// Statements
@@ -748,31 +996,101 @@ func (g *generator) generateMethodBody(m *compiledMethod) []jen.Code {
 func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) []jen.Code {
 	switch s := stmt.(type) {
 	case *parser.Assignment:
-		expr := g.generateExpr(s.Value, m)
 		target := s.Target
-		// Check if it's an instance variable
+		// Check if it's an instance variable (string typed)
 		if g.instanceVars[target] {
+			// For instance variables, we need string values
+			var expr *jen.Statement
+			switch v := s.Value.(type) {
+			case *parser.Identifier:
+				// Check if value is a method arg - use original string param
+				isMethodArg := false
+				for _, arg := range m.args {
+					if arg == v.Name {
+						isMethodArg = true
+						break
+					}
+				}
+				if isMethodArg {
+					expr = jen.Id(v.Name) // Use original string parameter
+				} else if g.instanceVars[v.Name] {
+					// Assigning one ivar to another - already a string
+					expr = g.generateExpr(s.Value, m)
+				} else {
+					// Local variable - need to convert to string
+					expr = jen.Id("_toStr").Call(g.generateExpr(s.Value, m))
+				}
+			case *parser.BinaryExpr:
+				// Arithmetic expression - result is int, need to convert to string
+				expr = jen.Qual("strconv", "Itoa").Call(g.generateExpr(s.Value, m))
+			case *parser.StringLit:
+				// String literal - already a string
+				expr = g.generateExpr(s.Value, m)
+			case *parser.JSONPrimitiveExpr:
+				// JSON primitives return strings
+				expr = g.generateExpr(s.Value, m)
+			case *parser.MessageSend:
+				// Message sends return strings
+				expr = g.generateExpr(s.Value, m)
+			default:
+				// Default: wrap in _toStr for safety
+				expr = jen.Id("_toStr").Call(g.generateExpr(s.Value, m))
+			}
 			return []jen.Code{jen.Id("c").Dot(capitalize(target)).Op("=").Add(expr)}
+		}
+		// For local variables
+		expr := g.generateExpr(s.Value, m)
+		// Check if target was renamed to avoid Go builtin conflict
+		if renamed, ok := m.renamedVars[target]; ok {
+			target = renamed
 		}
 		return []jen.Code{jen.Id(target).Op("=").Add(expr)}
 
 	case *parser.Return:
+		// Check for iteration expression as return value
+		if iterVal, ok := s.Value.(*parser.IterationExprAsValue); ok {
+			// Generate iteration statements (collect: or select: produce _results)
+			iterStmts := g.generateIterationStatement(iterVal.Iteration, m)
+			// Return the results as JSON
+			returnStmt := jen.List(jen.Id("_resultJSON"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("_results"))
+			if m.returnsErr {
+				return append(iterStmts, returnStmt, jen.Return(jen.String().Call(jen.Id("_resultJSON")), jen.Nil()))
+			}
+			return append(iterStmts, returnStmt, jen.Return(jen.String().Call(jen.Id("_resultJSON"))))
+		}
+		if dynIterVal, ok := s.Value.(*parser.DynamicIterationExprAsValue); ok {
+			// Generate dynamic iteration statements (collect: or select: produce _results)
+			iterStmts := g.generateDynamicIterationStatement(dynIterVal.Iteration, m)
+			// Return the results as JSON
+			returnStmt := jen.List(jen.Id("_resultJSON"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("_results"))
+			if m.returnsErr {
+				return append(iterStmts, returnStmt, jen.Return(jen.String().Call(jen.Id("_resultJSON")), jen.Nil()))
+			}
+			return append(iterStmts, returnStmt, jen.Return(jen.String().Call(jen.Id("_resultJSON"))))
+		}
+
 		expr := g.generateExpr(s.Value, m)
-		// Check if the return value is already a string (message sends, string literals)
+		// Check if the return value is already a string (message sends, string literals, JSON primitives)
 		_, isMessageSend := s.Value.(*parser.MessageSend)
 		_, isStringLit := s.Value.(*parser.StringLit)
-		if isMessageSend || isStringLit {
+		_, isJSONPrimitive := s.Value.(*parser.JSONPrimitiveExpr)
+		// Check if return value is an instance variable (all are string typed)
+		isIvarReturn := false
+		if id, ok := s.Value.(*parser.Identifier); ok {
+			isIvarReturn = g.instanceVars[id.Name]
+		}
+		if isMessageSend || isStringLit || isJSONPrimitive || isIvarReturn {
 			// Already a string, no conversion needed
 			if m.returnsErr {
 				return []jen.Code{jen.Return(expr, jen.Nil())}
 			}
 			return []jen.Code{jen.Return(expr)}
 		}
-		// Numeric values need conversion
+		// Other values - use _toStr for interface{} compatibility
 		if m.returnsErr {
-			return []jen.Code{jen.Return(jen.Qual("strconv", "Itoa").Call(expr), jen.Nil())}
+			return []jen.Code{jen.Return(jen.Id("_toStr").Call(expr), jen.Nil())}
 		}
-		return []jen.Code{jen.Return(jen.Qual("strconv", "Itoa").Call(expr))}
+		return []jen.Code{jen.Return(jen.Id("_toStr").Call(expr))}
 
 	case *parser.ExprStmt:
 		return []jen.Code{g.generateExpr(s.Expr, m)}
@@ -783,6 +1101,12 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 	case *parser.WhileExpr:
 		return g.generateWhileStatement(s, m)
 
+	case *parser.IterationExpr:
+		return g.generateIterationStatement(s, m)
+
+	case *parser.DynamicIterationExpr:
+		return g.generateDynamicIterationStatement(s, m)
+
 	default:
 		return []jen.Code{jen.Comment("unknown statement")}
 	}
@@ -790,7 +1114,7 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 
 // generateIfStatement generates Go if/else from Trashtalk ifTrue:/ifFalse:
 func (g *generator) generateIfStatement(s *parser.IfExpr, m *compiledMethod) []jen.Code {
-	condition := g.generateExpr(s.Condition, m)
+	condition := g.generateCondition(s.Condition, m)
 
 	// Generate true block statements
 	var trueStmts []jen.Code
@@ -825,6 +1149,21 @@ func (g *generator) generateIfStatement(s *parser.IfExpr, m *compiledMethod) []j
 	return []jen.Code{jen.Comment("empty if statement")}
 }
 
+// generateCondition generates a Go boolean condition from a Trashtalk expression.
+// Comparisons return bool directly, but message sends return strings.
+// For message sends, we convert to bool with: result != ""
+func (g *generator) generateCondition(expr parser.Expr, m *compiledMethod) *jen.Statement {
+	// Check if the expression is a comparison (already returns bool)
+	switch expr.(type) {
+	case *parser.ComparisonExpr:
+		return g.generateExpr(expr, m)
+	}
+
+	// For message sends and other expressions, wrap in truthiness check
+	// In Trashtalk, non-empty string = truthy
+	return g.generateExpr(expr, m).Op("!=").Lit("")
+}
+
 // generateWhileStatement generates Go for loop from Trashtalk whileTrue:
 func (g *generator) generateWhileStatement(s *parser.WhileExpr, m *compiledMethod) []jen.Code {
 	condition := g.generateExpr(s.Condition, m)
@@ -841,11 +1180,296 @@ func (g *generator) generateWhileStatement(s *parser.WhileExpr, m *compiledMetho
 	}
 }
 
+// generateIterationStatement generates Go for loop from Trashtalk do:/collect:/select:
+func (g *generator) generateIterationStatement(s *parser.IterationExpr, m *compiledMethod) []jen.Code {
+	collectionExpr := g.generateExpr(s.Collection, m)
+	iterVar := s.IterVar
+	rawIterVar := "_" + iterVar // Raw interface{} variable from range
+
+	// Check if collection is a native array (from JSON primitives) vs JSON string
+	isNativeArray := g.exprResultsInArray(s.Collection)
+
+	// Type conversion at start of loop: iterVar := toInt(_iterVar)
+	typeConversion := jen.Id(iterVar).Op(":=").Id("toInt").Call(jen.Id(rawIterVar))
+
+	switch s.Kind {
+	case "do":
+		// For do:, generate body statements normally
+		var bodyStmts []jen.Code
+		for _, stmt := range s.Body {
+			bodyStmts = append(bodyStmts, g.generateIterationBodyStatement(stmt, m, iterVar)...)
+		}
+
+		// Prepend type conversion
+		loopBody := append([]jen.Code{typeConversion}, bodyStmts...)
+
+		if isNativeArray {
+			// Native array: iterate directly over []interface{}
+			return []jen.Code{
+				jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Add(collectionExpr)).Block(loopBody...),
+			}
+		}
+		// JSON string: unmarshal first
+		return []jen.Code{
+			jen.Var().Id("_items").Index().Interface(),
+			jen.Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(collectionExpr),
+				jen.Op("&").Id("_items"),
+			),
+			jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Id("_items")).Block(loopBody...),
+		}
+
+	case "collect":
+		// For collect:, the last statement's expression becomes the collected value
+		bodyStmts, resultExpr := g.generateCollectBody(s.Body, m, iterVar)
+
+		// Prepend type conversion, then body, then append result
+		loopBody := append([]jen.Code{typeConversion}, bodyStmts...)
+		loopBody = append(loopBody, jen.Id("_results").Op("=").Append(jen.Id("_results"), resultExpr))
+
+		if isNativeArray {
+			// Native array: collect directly into []interface{}
+			return []jen.Code{
+				jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0), jen.Len(collectionExpr)),
+				jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Add(collectionExpr)).Block(loopBody...),
+			}
+		}
+		// JSON string: unmarshal first
+		return []jen.Code{
+			jen.Var().Id("_items").Index().Interface(),
+			jen.Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(collectionExpr),
+				jen.Op("&").Id("_items"),
+			),
+			jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0)),
+			jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Id("_items")).Block(loopBody...),
+		}
+
+	case "select":
+		// For select:, the last statement's expression becomes the filter condition
+		bodyStmts, conditionExpr := g.generateSelectBody(s.Body, m, iterVar)
+
+		// For select, we need to keep the original interface{} value for appending
+		// But use the typed value for the condition
+		loopBody := append([]jen.Code{typeConversion}, bodyStmts...)
+		loopBody = append(loopBody, jen.If(conditionExpr).Block(
+			jen.Id("_results").Op("=").Append(jen.Id("_results"), jen.Id(rawIterVar)),
+		))
+
+		if isNativeArray {
+			// Native array: filter directly into []interface{}
+			return []jen.Code{
+				jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0)),
+				jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Add(collectionExpr)).Block(loopBody...),
+			}
+		}
+		// JSON string: unmarshal first
+		return []jen.Code{
+			jen.Var().Id("_items").Index().Interface(),
+			jen.Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(collectionExpr),
+				jen.Op("&").Id("_items"),
+			),
+			jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0)),
+			jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Id("_items")).Block(loopBody...),
+		}
+
+	default:
+		return []jen.Code{jen.Comment("unknown iteration kind: " + s.Kind)}
+	}
+}
+
+// generateCollectBody generates the body statements for a collect: block
+// Returns the body statements (all but last) and the result expression (last statement)
+func (g *generator) generateCollectBody(body []parser.Statement, m *compiledMethod, iterVar string) ([]jen.Code, *jen.Statement) {
+	if len(body) == 0 {
+		return nil, jen.Nil()
+	}
+
+	var stmts []jen.Code
+	// Generate all statements except the last
+	for i := 0; i < len(body)-1; i++ {
+		stmts = append(stmts, g.generateIterationBodyStatement(body[i], m, iterVar)...)
+	}
+
+	// Last statement should be an expression - extract it as the result
+	lastStmt := body[len(body)-1]
+	if exprStmt, ok := lastStmt.(*parser.ExprStmt); ok {
+		return stmts, g.generateExpr(exprStmt.Expr, m)
+	}
+
+	// If last statement is not an expression, generate it normally and return nil
+	stmts = append(stmts, g.generateIterationBodyStatement(lastStmt, m, iterVar)...)
+	return stmts, jen.Nil()
+}
+
+// generateSelectBody generates the body statements for a select: block
+// Returns the body statements (all but last) and the condition expression (last statement)
+func (g *generator) generateSelectBody(body []parser.Statement, m *compiledMethod, iterVar string) ([]jen.Code, *jen.Statement) {
+	if len(body) == 0 {
+		return nil, jen.Lit(false)
+	}
+
+	var stmts []jen.Code
+	// Generate all statements except the last
+	for i := 0; i < len(body)-1; i++ {
+		stmts = append(stmts, g.generateIterationBodyStatement(body[i], m, iterVar)...)
+	}
+
+	// Last statement should be an expression (the predicate) - extract it
+	lastStmt := body[len(body)-1]
+	if exprStmt, ok := lastStmt.(*parser.ExprStmt); ok {
+		return stmts, g.generateExpr(exprStmt.Expr, m)
+	}
+
+	// If last statement is not an expression, generate it normally and return false
+	stmts = append(stmts, g.generateIterationBodyStatement(lastStmt, m, iterVar)...)
+	return stmts, jen.Lit(false)
+}
+
+// generateIterationBodyStatement generates statements within an iteration block
+// The iterVar is available as a local variable
+func (g *generator) generateIterationBodyStatement(stmt parser.Statement, m *compiledMethod, iterVar string) []jen.Code {
+	// For now, just generate the statement normally
+	// The iterVar will be in scope from the for loop
+	return g.generateStatement(stmt, m)
+}
+
+// generateDynamicIterationStatement generates shell-out iteration for dynamic blocks (Phase 2)
+// When the block is a variable/parameter, we call back to Bash for each element
+func (g *generator) generateDynamicIterationStatement(s *parser.DynamicIterationExpr, m *compiledMethod) []jen.Code {
+	collectionExpr := g.generateExpr(s.Collection, m)
+	// Block IDs are strings - don't use the Int conversion
+	blockExpr := g.generateExprAsString(s.BlockVar, m)
+
+	// Check if collection is a native array (from JSON primitives) vs JSON string
+	isNativeArray := g.exprResultsInArray(s.Collection)
+
+	switch s.Kind {
+	case "do":
+		if isNativeArray {
+			// Native array: iterate directly, call block for each element
+			return []jen.Code{
+				jen.For(jen.List(jen.Id("_"), jen.Id("_elem")).Op(":=").Range().Add(collectionExpr)).Block(
+					jen.Id("_").Op("=").Id("invokeBlock").Call(
+						blockExpr,
+						jen.Id("_elem"),
+					),
+				),
+			}
+		}
+		// JSON string: unmarshal first
+		return []jen.Code{
+			jen.Var().Id("_items").Index().Interface(),
+			jen.Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(collectionExpr),
+				jen.Op("&").Id("_items"),
+			),
+			jen.For(jen.List(jen.Id("_"), jen.Id("_elem")).Op(":=").Range().Id("_items")).Block(
+				jen.Id("_").Op("=").Id("invokeBlock").Call(
+					blockExpr,
+					jen.Id("_elem"),
+				),
+			),
+		}
+
+	case "collect":
+		if isNativeArray {
+			// Native array: collect results from block calls
+			return []jen.Code{
+				jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0), jen.Len(collectionExpr)),
+				jen.For(jen.List(jen.Id("_"), jen.Id("_elem")).Op(":=").Range().Add(collectionExpr)).Block(
+					jen.Id("_result").Op(":=").Id("invokeBlock").Call(
+						blockExpr,
+						jen.Id("_elem"),
+					),
+					jen.Id("_results").Op("=").Append(jen.Id("_results"), jen.Id("_result")),
+				),
+			}
+		}
+		// JSON string: unmarshal first
+		return []jen.Code{
+			jen.Var().Id("_items").Index().Interface(),
+			jen.Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(collectionExpr),
+				jen.Op("&").Id("_items"),
+			),
+			jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0)),
+			jen.For(jen.List(jen.Id("_"), jen.Id("_elem")).Op(":=").Range().Id("_items")).Block(
+				jen.Id("_result").Op(":=").Id("invokeBlock").Call(
+					blockExpr,
+					jen.Id("_elem"),
+				),
+				jen.Id("_results").Op("=").Append(jen.Id("_results"), jen.Id("_result")),
+			),
+		}
+
+	case "select":
+		if isNativeArray {
+			// Native array: filter based on block result
+			return []jen.Code{
+				jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0)),
+				jen.For(jen.List(jen.Id("_"), jen.Id("_elem")).Op(":=").Range().Add(collectionExpr)).Block(
+					jen.Id("_result").Op(":=").Id("invokeBlock").Call(
+						blockExpr,
+						jen.Id("_elem"),
+					),
+					jen.Comment("Non-empty string result means true"),
+					jen.If(jen.Id("_result").Op("!=").Lit("")).Block(
+						jen.Id("_results").Op("=").Append(jen.Id("_results"), jen.Id("_elem")),
+					),
+				),
+			}
+		}
+		// JSON string: unmarshal first
+		return []jen.Code{
+			jen.Var().Id("_items").Index().Interface(),
+			jen.Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(collectionExpr),
+				jen.Op("&").Id("_items"),
+			),
+			jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0)),
+			jen.For(jen.List(jen.Id("_"), jen.Id("_elem")).Op(":=").Range().Id("_items")).Block(
+				jen.Id("_result").Op(":=").Id("invokeBlock").Call(
+					blockExpr,
+					jen.Id("_elem"),
+				),
+				jen.Comment("Non-empty string result means true"),
+				jen.If(jen.Id("_result").Op("!=").Lit("")).Block(
+					jen.Id("_results").Op("=").Append(jen.Id("_results"), jen.Id("_elem")),
+				),
+			),
+		}
+
+	default:
+		return []jen.Code{jen.Comment("unknown dynamic iteration kind: " + s.Kind)}
+	}
+}
+
+// generateExprAsString generates an expression keeping method args as strings (no int conversion)
+// Used for block IDs and other cases where we need the original string parameter
+func (g *generator) generateExprAsString(expr parser.Expr, m *compiledMethod) *jen.Statement {
+	switch e := expr.(type) {
+	case *parser.Identifier:
+		name := e.Name
+		// Check if it's an instance variable
+		if g.instanceVars[name] {
+			return jen.Id("c").Dot(capitalize(name))
+		}
+		// For method args, use the string parameter directly (no Int conversion)
+		return jen.Id(name)
+	default:
+		// For other expressions, fall back to regular generation
+		return g.generateExpr(expr, m)
+	}
+}
+
 func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.Statement {
 	switch e := expr.(type) {
 	case *parser.BinaryExpr:
-		left := g.generateExpr(e.Left, m)
-		right := g.generateExpr(e.Right, m)
+		// Wrap in toInt() for interface{} compatibility
+		left := jen.Id("toInt").Call(g.generateExpr(e.Left, m))
+		right := jen.Id("toInt").Call(g.generateExpr(e.Right, m))
 		switch e.Op {
 		case "+":
 			return left.Op("+").Add(right)
@@ -859,8 +1483,9 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 		return jen.Comment("unknown op: " + e.Op)
 
 	case *parser.ComparisonExpr:
-		left := g.generateExpr(e.Left, m)
-		right := g.generateExpr(e.Right, m)
+		// Wrap in toInt() for interface{} compatibility
+		left := jen.Id("toInt").Call(g.generateExpr(e.Left, m))
+		right := jen.Id("toInt").Call(g.generateExpr(e.Right, m))
 		return left.Op(e.Op).Add(right)
 
 	case *parser.Identifier:
@@ -874,6 +1499,10 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 			if arg == name {
 				return jen.Id(name + "Int") // Use argName + "Int" for converted int
 			}
+		}
+		// Check if this variable was renamed to avoid Go builtin conflict
+		if renamed, ok := m.renamedVars[name]; ok {
+			return jen.Id(renamed)
 		}
 		return jen.Id(name)
 
@@ -918,9 +1547,57 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 			}
 			return jen.Id("c").Dot(goMethodName).Call(args...)
 		}
+
+		// Check for block invocation pattern: @ aBlock value / valueWith: / valueWith:and:
+		// When receiver is a method parameter and selector is a block invocation selector,
+		// use invokeBlock() instead of sendMessage() for better performance
+		if ident, ok := e.Receiver.(*parser.Identifier); ok {
+			isMethodParam := false
+			for _, arg := range m.args {
+				if arg == ident.Name {
+					isMethodParam = true
+					break
+				}
+			}
+			if isMethodParam && isBlockInvocationSelector(e.Selector) {
+				// Generate: invokeBlock(blockID, args...)
+				blockArgs := []jen.Code{jen.Id(ident.Name)} // Use string param directly
+				for _, arg := range e.Args {
+					blockArgs = append(blockArgs, g.generateExprAsString(arg, m))
+				}
+				return jen.Id("invokeBlock").Call(blockArgs...)
+			}
+		}
+
 		// Non-self send: shell out to bash runtime
 		// Generate: sendMessage(receiver, selector, args...)
-		receiverExpr := g.generateExpr(e.Receiver, m)
+		var receiverExpr *jen.Statement
+		// Check if receiver is a class name (uppercase identifier that's not a local var)
+		if ident, ok := e.Receiver.(*parser.Identifier); ok {
+			name := ident.Name
+			isLocalVar := false
+			// Check instance vars, method args, and local vars
+			if g.instanceVars[name] {
+				isLocalVar = true
+			}
+			for _, arg := range m.args {
+				if arg == name {
+					isLocalVar = true
+					break
+				}
+			}
+			if _, ok := m.renamedVars[name]; ok {
+				isLocalVar = true
+			}
+			// Uppercase name that's not a local var is a class name - use string literal
+			if !isLocalVar && len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
+				receiverExpr = jen.Lit(name)
+			} else {
+				receiverExpr = g.generateExpr(e.Receiver, m)
+			}
+		} else {
+			receiverExpr = g.generateExpr(e.Receiver, m)
+		}
 		args := []jen.Code{
 			receiverExpr,
 			jen.Lit(e.Selector),
@@ -930,8 +1607,189 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 		}
 		return jen.Id("sendMessage").Call(args...)
 
+	case *parser.JSONPrimitiveExpr:
+		return g.generateJSONPrimitive(e, m)
+
+	case *parser.BlockExpr:
+		// Block used as expression (e.g., [i < len] whileTrue: [...])
+		// If it has a single expression statement, extract and evaluate it
+		if len(e.Statements) == 1 {
+			if exprStmt, ok := e.Statements[0].(*parser.ExprStmt); ok {
+				return g.generateExpr(exprStmt.Expr, m)
+			}
+		}
+		// Complex block - can't inline as expression
+		return jen.Comment("complex block expression not supported")
+
 	default:
 		return jen.Comment("unknown expr")
+	}
+}
+
+// generateStringArg generates an expression that keeps the original string value
+// (unlike generateExpr which converts method args to int)
+func (g *generator) generateStringArg(expr parser.Expr, m *compiledMethod) *jen.Statement {
+	switch e := expr.(type) {
+	case *parser.Identifier:
+		// For identifiers, check if it's a method arg - if so, use the original string
+		for _, arg := range m.args {
+			if arg == e.Name {
+				return jen.Id(e.Name) // Use original string parameter
+			}
+		}
+		// Otherwise, fall through to normal generation
+		return g.generateExpr(expr, m)
+	case *parser.StringLit:
+		return jen.Lit(e.Value)
+	default:
+		// For other expressions, use normal generation
+		return g.generateExpr(expr, m)
+	}
+}
+
+// generateJSONPrimitive generates Go code for JSON primitive operations
+func (g *generator) generateJSONPrimitive(e *parser.JSONPrimitiveExpr, m *compiledMethod) *jen.Statement {
+	receiver := g.generateExpr(e.Receiver, m)
+
+	// Check if receiver expression results in a typed array/object
+	// This handles both direct ivar access and chained operations
+	isArrayType := g.exprResultsInArray(e.Receiver)
+	isObjectType := g.exprResultsInObject(e.Receiver)
+
+	switch e.Operation {
+	// Array operations
+	case "arrayLength":
+		// Return string for consistency - all JSON primitives return strings
+		if isArrayType {
+			return jen.Qual("strconv", "Itoa").Call(jen.Len(receiver))
+		}
+		// Fallback: string containing JSON - _jsonArrayLen returns int, wrap in Itoa
+		return jen.Qual("strconv", "Itoa").Call(jen.Id("_jsonArrayLen").Call(receiver))
+
+	case "arrayFirst":
+		if isArrayType {
+			// Return string for consistency - _arrayFirst returns interface{}, convert to string
+			return jen.Id("_toStr").Call(jen.Id("_arrayFirst").Call(receiver))
+		}
+		// JSON array - _jsonArrayFirst returns string
+		return jen.Id("_jsonArrayFirst").Call(receiver)
+
+	case "arrayLast":
+		if isArrayType {
+			// Return string for consistency - _arrayLast returns interface{}, convert to string
+			return jen.Id("_toStr").Call(jen.Id("_arrayLast").Call(receiver))
+		}
+		// JSON array - _jsonArrayLast returns string
+		return jen.Id("_jsonArrayLast").Call(receiver)
+
+	case "arrayIsEmpty":
+		if isArrayType {
+			return jen.Id("_boolToString").Call(jen.Len(receiver).Op("==").Lit(0))
+		}
+		return jen.Id("_boolToString").Call(jen.Id("_jsonArrayIsEmpty").Call(receiver))
+
+	case "arrayPush":
+		arg := g.generateExpr(e.Args[0], m)
+		if isArrayType {
+			// Optimization: combine chained arrayPush into single append
+			// e.g., items arrayPush: x arrayPush: y -> append(c.Items, x, y)
+			allArgs, baseReceiver := g.collectArrayPushArgs(e, m)
+			if len(allArgs) > 1 {
+				// Build append(base, arg1, arg2, ...) - all args in one slice
+				codes := make([]jen.Code, 0, len(allArgs)+1)
+				codes = append(codes, baseReceiver)
+				for _, a := range allArgs {
+					codes = append(codes, a)
+				}
+				return jen.Append(codes...)
+			}
+			// Single append
+			return jen.Append(receiver, arg)
+		}
+		return jen.Id("_jsonArrayPush").Call(receiver, arg)
+
+	case "arrayAt":
+		idx := g.generateExpr(e.Args[0], m)
+		if isArrayType {
+			// Return string for consistency - element is interface{}, convert to string
+			return jen.Id("_toStr").Call(receiver.Clone().Index(jen.Id("toInt").Call(idx)))
+		}
+		// JSON array - _jsonArrayAt returns string, wrap idx in toInt for interface{} compatibility
+		return jen.Id("_jsonArrayAt").Call(receiver, jen.Id("toInt").Call(idx))
+
+	case "arrayAtPut":
+		idx := g.generateExpr(e.Args[0], m)
+		val := g.generateExpr(e.Args[1], m)
+		if isArrayType {
+			// Return new slice with updated element (immutable style)
+			return jen.Id("_arrayAtPut").Call(receiver, idx, val)
+		}
+		return jen.Id("_jsonArrayAtPut").Call(receiver, idx, val)
+
+	case "arrayRemoveAt":
+		idx := g.generateExpr(e.Args[0], m)
+		if isArrayType {
+			return jen.Id("_arrayRemoveAt").Call(receiver, idx)
+		}
+		return jen.Id("_jsonArrayRemoveAt").Call(receiver, idx)
+
+	// Object operations
+	case "objectLength":
+		if isObjectType {
+			return jen.Qual("strconv", "Itoa").Call(jen.Len(receiver))
+		}
+		return jen.Qual("strconv", "Itoa").Call(jen.Id("_jsonObjectLen").Call(receiver))
+
+	case "objectKeys":
+		if isObjectType {
+			return jen.Id("_mapKeys").Call(receiver)
+		}
+		return jen.Id("_jsonObjectKeys").Call(receiver)
+
+	case "objectValues":
+		if isObjectType {
+			return jen.Id("_mapValues").Call(receiver)
+		}
+		return jen.Id("_jsonObjectValues").Call(receiver)
+
+	case "objectIsEmpty":
+		if isObjectType {
+			return jen.Id("_boolToString").Call(jen.Len(receiver).Op("==").Lit(0))
+		}
+		return jen.Id("_boolToString").Call(jen.Id("_jsonObjectIsEmpty").Call(receiver))
+
+	case "objectAt":
+		key := g.generateStringArg(e.Args[0], m) // Object keys are always strings
+		if isObjectType {
+			return jen.Id("_toStr").Call(receiver.Clone().Index(key))
+		}
+		return jen.Id("_jsonObjectAt").Call(receiver, key)
+
+	case "objectAtPut":
+		key := g.generateStringArg(e.Args[0], m) // Object keys are always strings
+		val := g.generateExpr(e.Args[1], m)
+		if isObjectType {
+			// Return new map with updated key (immutable style)
+			return jen.Id("_mapAtPut").Call(receiver, key, val)
+		}
+		return jen.Id("_jsonObjectAtPut").Call(receiver, key, val)
+
+	case "objectHasKey":
+		key := g.generateStringArg(e.Args[0], m) // Object keys are always strings
+		if isObjectType {
+			return jen.Id("_boolToString").Call(jen.Id("_mapHasKey").Call(receiver, key))
+		}
+		return jen.Id("_boolToString").Call(jen.Id("_jsonObjectHasKey").Call(receiver, key))
+
+	case "objectRemoveKey":
+		key := g.generateStringArg(e.Args[0], m) // Object keys are always strings
+		if isObjectType {
+			return jen.Id("_mapRemoveKey").Call(receiver, key)
+		}
+		return jen.Id("_jsonObjectRemoveKey").Call(receiver, key)
+
+	default:
+		return jen.Comment("unknown JSON primitive: " + e.Operation)
 	}
 }
 
@@ -954,6 +1812,483 @@ func mustAtoi(s string) int {
 	var n int
 	fmt.Sscanf(s, "%d", &n)
 	return n
+}
+
+// isBlockInvocationSelector returns true if the selector is used to invoke blocks
+// These are: value, valueWith:, valueWith:and:
+// Note: Parser transforms "valueWith:" to "valueWith_" and "valueWith:and:" to "valueWith_and_"
+func isBlockInvocationSelector(selector string) bool {
+	switch selector {
+	case "value", "valueWith_", "valueWith_and_":
+		return true
+	default:
+		return false
+	}
+}
+
+// goBuiltins are Go builtin identifiers that cannot be used as variable names
+var goBuiltins = map[string]bool{
+	"len": true, "cap": true, "make": true, "new": true, "append": true,
+	"copy": true, "delete": true, "close": true, "panic": true, "recover": true,
+	"print": true, "println": true, "complex": true, "real": true, "imag": true,
+	"true": true, "false": true, "nil": true, "iota": true,
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"float32": true, "float64": true, "complex64": true, "complex128": true,
+	"byte": true, "rune": true, "string": true, "bool": true, "error": true,
+}
+
+// safeGoName returns a safe Go identifier, renaming if it conflicts with builtins
+func safeGoName(name string) string {
+	if goBuiltins[name] {
+		return name + "_"
+	}
+	return name
+}
+
+// collectArrayPushArgs collects all arguments from a chain of arrayPush operations
+// Returns the collected args and the base receiver (the original array ivar)
+// e.g., for "items arrayPush: x arrayPush: y arrayPush: z", returns ([x,y,z], c.Items)
+func (g *generator) collectArrayPushArgs(e *parser.JSONPrimitiveExpr, m *compiledMethod) ([]*jen.Statement, *jen.Statement) {
+	if e.Operation != "arrayPush" {
+		return nil, nil
+	}
+
+	// Collect args in reverse order (innermost first)
+	var args []*jen.Statement
+	current := e
+
+	for {
+		// Add current arg
+		arg := g.generateExpr(current.Args[0], m)
+		args = append(args, arg)
+
+		// Check if receiver is another arrayPush
+		if inner, ok := current.Receiver.(*parser.JSONPrimitiveExpr); ok && inner.Operation == "arrayPush" {
+			current = inner
+		} else {
+			// Base case: receiver is not arrayPush
+			break
+		}
+	}
+
+	// Get the base receiver (the original array)
+	baseReceiver := g.generateExpr(current.Receiver, m)
+
+	// Reverse args to get correct order (outermost first)
+	for i, j := 0, len(args)-1; i < j; i, j = i+1, j-1 {
+		args[i], args[j] = args[j], args[i]
+	}
+
+	return args, baseReceiver
+}
+
+// generateJSONHelpers generates helper functions for JSON primitive operations
+func (g *generator) generateJSONHelpers(f *jen.File) {
+	// Common conversion helpers
+	f.Comment("// Common conversion helpers")
+
+	// _boolToString - convert bool to "true"/"false" string
+	f.Func().Id("_boolToString").Params(jen.Id("b").Bool()).String().Block(
+		jen.If(jen.Id("b")).Block(
+			jen.Return(jen.Lit("true")),
+		),
+		jen.Return(jen.Lit("false")),
+	)
+	f.Line()
+
+	// _toStr - convert interface{} to string
+	f.Func().Id("_toStr").Params(jen.Id("v").Interface()).String().Block(
+		jen.If(jen.Id("v").Op("==").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("v"))),
+	)
+	f.Line()
+
+	// Array helpers for []interface{} typed fields
+	f.Comment("// Array helpers for native slice operations")
+
+	// _arrayFirst - get first element of slice
+	f.Func().Id("_arrayFirst").Params(jen.Id("arr").Index().Interface()).Interface().Block(
+		jen.If(jen.Len(jen.Id("arr")).Op("==").Lit(0)).Block(
+			jen.Return(jen.Nil()),
+		),
+		jen.Return(jen.Id("arr").Index(jen.Lit(0))),
+	)
+	f.Line()
+
+	// _arrayLast - get last element of slice
+	f.Func().Id("_arrayLast").Params(jen.Id("arr").Index().Interface()).Interface().Block(
+		jen.If(jen.Len(jen.Id("arr")).Op("==").Lit(0)).Block(
+			jen.Return(jen.Nil()),
+		),
+		jen.Return(jen.Id("arr").Index(jen.Len(jen.Id("arr")).Op("-").Lit(1))),
+	)
+	f.Line()
+
+	// _arrayAtPut - return new slice with element at index replaced
+	f.Func().Id("_arrayAtPut").Params(
+		jen.Id("arr").Index().Interface(),
+		jen.Id("idx").Int(),
+		jen.Id("val").Interface(),
+	).Index().Interface().Block(
+		jen.Comment("Handle negative indices"),
+		jen.If(jen.Id("idx").Op("<").Lit(0)).Block(
+			jen.Id("idx").Op("=").Len(jen.Id("arr")).Op("+").Id("idx"),
+		),
+		jen.If(jen.Id("idx").Op("<").Lit(0).Op("||").Id("idx").Op(">=").Len(jen.Id("arr"))).Block(
+			jen.Return(jen.Id("arr")),
+		),
+		jen.Id("result").Op(":=").Make(jen.Index().Interface(), jen.Len(jen.Id("arr"))),
+		jen.Copy(jen.Id("result"), jen.Id("arr")),
+		jen.Id("result").Index(jen.Id("idx")).Op("=").Id("val"),
+		jen.Return(jen.Id("result")),
+	)
+	f.Line()
+
+	// _arrayRemoveAt - return new slice with element at index removed
+	f.Func().Id("_arrayRemoveAt").Params(
+		jen.Id("arr").Index().Interface(),
+		jen.Id("idx").Int(),
+	).Index().Interface().Block(
+		jen.Comment("Handle negative indices"),
+		jen.If(jen.Id("idx").Op("<").Lit(0)).Block(
+			jen.Id("idx").Op("=").Len(jen.Id("arr")).Op("+").Id("idx"),
+		),
+		jen.If(jen.Id("idx").Op("<").Lit(0).Op("||").Id("idx").Op(">=").Len(jen.Id("arr"))).Block(
+			jen.Return(jen.Id("arr")),
+		),
+		jen.Id("result").Op(":=").Make(jen.Index().Interface(), jen.Lit(0), jen.Len(jen.Id("arr")).Op("-").Lit(1)),
+		jen.Id("result").Op("=").Append(jen.Id("result"), jen.Id("arr").Index(jen.Op(":").Id("idx")).Op("...")),
+		jen.Id("result").Op("=").Append(jen.Id("result"), jen.Id("arr").Index(jen.Id("idx").Op("+").Lit(1).Op(":")).Op("...")),
+		jen.Return(jen.Id("result")),
+	)
+	f.Line()
+
+	// Map helpers for map[string]interface{} typed fields
+	f.Comment("// Map helpers for native map operations")
+
+	// _mapKeys - get all keys from map
+	f.Func().Id("_mapKeys").Params(jen.Id("m").Map(jen.String()).Interface()).Index().String().Block(
+		jen.Id("keys").Op(":=").Make(jen.Index().String(), jen.Lit(0), jen.Len(jen.Id("m"))),
+		jen.For(jen.Id("k").Op(":=").Range().Id("m")).Block(
+			jen.Id("keys").Op("=").Append(jen.Id("keys"), jen.Id("k")),
+		),
+		jen.Return(jen.Id("keys")),
+	)
+	f.Line()
+
+	// _mapValues - get all values from map
+	f.Func().Id("_mapValues").Params(jen.Id("m").Map(jen.String()).Interface()).Index().Interface().Block(
+		jen.Id("vals").Op(":=").Make(jen.Index().Interface(), jen.Lit(0), jen.Len(jen.Id("m"))),
+		jen.For(jen.List(jen.Id("_"), jen.Id("v")).Op(":=").Range().Id("m")).Block(
+			jen.Id("vals").Op("=").Append(jen.Id("vals"), jen.Id("v")),
+		),
+		jen.Return(jen.Id("vals")),
+	)
+	f.Line()
+
+	// _mapHasKey - check if key exists
+	f.Func().Id("_mapHasKey").Params(
+		jen.Id("m").Map(jen.String()).Interface(),
+		jen.Id("key").String(),
+	).Bool().Block(
+		jen.List(jen.Id("_"), jen.Id("ok")).Op(":=").Id("m").Index(jen.Id("key")),
+		jen.Return(jen.Id("ok")),
+	)
+	f.Line()
+
+	// _mapAtPut - return new map with key set (immutable style)
+	f.Func().Id("_mapAtPut").Params(
+		jen.Id("m").Map(jen.String()).Interface(),
+		jen.Id("key").String(),
+		jen.Id("val").Interface(),
+	).Map(jen.String()).Interface().Block(
+		jen.Id("result").Op(":=").Make(jen.Map(jen.String()).Interface(), jen.Len(jen.Id("m")).Op("+").Lit(1)),
+		jen.For(jen.List(jen.Id("k"), jen.Id("v")).Op(":=").Range().Id("m")).Block(
+			jen.Id("result").Index(jen.Id("k")).Op("=").Id("v"),
+		),
+		jen.Id("result").Index(jen.Id("key")).Op("=").Id("val"),
+		jen.Return(jen.Id("result")),
+	)
+	f.Line()
+
+	// _mapRemoveKey - return new map with key removed
+	f.Func().Id("_mapRemoveKey").Params(
+		jen.Id("m").Map(jen.String()).Interface(),
+		jen.Id("key").String(),
+	).Map(jen.String()).Interface().Block(
+		jen.Id("result").Op(":=").Make(jen.Map(jen.String()).Interface(), jen.Len(jen.Id("m"))),
+		jen.For(jen.List(jen.Id("k"), jen.Id("v")).Op(":=").Range().Id("m")).Block(
+			jen.If(jen.Id("k").Op("!=").Id("key")).Block(
+				jen.Id("result").Index(jen.Id("k")).Op("=").Id("v"),
+			),
+		),
+		jen.Return(jen.Id("result")),
+	)
+	f.Line()
+
+	// JSON string parsing helpers (for string-typed fields containing JSON)
+	f.Comment("// JSON string parsing helpers (for string-typed variables containing JSON)")
+
+	// _jsonArrayLen
+	f.Func().Id("_jsonArrayLen").Params(jen.Id("jsonStr").String()).Int().Block(
+		jen.Var().Id("arr").Index().Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("arr"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(0)),
+		),
+		jen.Return(jen.Len(jen.Id("arr"))),
+	)
+	f.Line()
+
+	// _jsonArrayFirst
+	f.Func().Id("_jsonArrayFirst").Params(jen.Id("jsonStr").String()).String().Block(
+		jen.Var().Id("arr").Index().Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("arr"),
+		).Op(";").Err().Op("!=").Nil().Op("||").Len(jen.Id("arr")).Op("==").Lit(0)).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("arr").Index(jen.Lit(0)))),
+	)
+	f.Line()
+
+	// _jsonArrayLast
+	f.Func().Id("_jsonArrayLast").Params(jen.Id("jsonStr").String()).String().Block(
+		jen.Var().Id("arr").Index().Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("arr"),
+		).Op(";").Err().Op("!=").Nil().Op("||").Len(jen.Id("arr")).Op("==").Lit(0)).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("arr").Index(jen.Len(jen.Id("arr")).Op("-").Lit(1)))),
+	)
+	f.Line()
+
+	// _jsonArrayIsEmpty
+	f.Func().Id("_jsonArrayIsEmpty").Params(jen.Id("jsonStr").String()).Bool().Block(
+		jen.Var().Id("arr").Index().Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("arr"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.True()),
+		),
+		jen.Return(jen.Len(jen.Id("arr")).Op("==").Lit(0)),
+	)
+	f.Line()
+
+	// _jsonArrayPush - accepts interface{} for jsonStr to handle interface{} local variables
+	f.Func().Id("_jsonArrayPush").Params(
+		jen.Id("jsonVal").Interface(),
+		jen.Id("val").Interface(),
+	).String().Block(
+		jen.Id("jsonStr").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("jsonVal")),
+		jen.Var().Id("arr").Index().Interface(),
+		jen.Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("arr"),
+		),
+		jen.Id("arr").Op("=").Append(jen.Id("arr"), jen.Id("val")),
+		jen.List(jen.Id("result"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("arr")),
+		jen.Return(jen.String().Parens(jen.Id("result"))),
+	)
+	f.Line()
+
+	// _jsonArrayAt
+	f.Func().Id("_jsonArrayAt").Params(
+		jen.Id("jsonStr").String(),
+		jen.Id("idx").Int(),
+	).String().Block(
+		jen.Var().Id("arr").Index().Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("arr"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.If(jen.Id("idx").Op("<").Lit(0)).Block(
+			jen.Id("idx").Op("=").Len(jen.Id("arr")).Op("+").Id("idx"),
+		),
+		jen.If(jen.Id("idx").Op("<").Lit(0).Op("||").Id("idx").Op(">=").Len(jen.Id("arr"))).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("arr").Index(jen.Id("idx")))),
+	)
+	f.Line()
+
+	// _jsonArrayAtPut
+	f.Func().Id("_jsonArrayAtPut").Params(
+		jen.Id("jsonStr").String(),
+		jen.Id("idx").Int(),
+		jen.Id("val").Interface(),
+	).String().Block(
+		jen.Var().Id("arr").Index().Interface(),
+		jen.Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("arr"),
+		),
+		jen.If(jen.Id("idx").Op("<").Lit(0)).Block(
+			jen.Id("idx").Op("=").Len(jen.Id("arr")).Op("+").Id("idx"),
+		),
+		jen.If(jen.Id("idx").Op(">=").Lit(0).Op("&&").Id("idx").Op("<").Len(jen.Id("arr"))).Block(
+			jen.Id("arr").Index(jen.Id("idx")).Op("=").Id("val"),
+		),
+		jen.List(jen.Id("result"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("arr")),
+		jen.Return(jen.String().Parens(jen.Id("result"))),
+	)
+	f.Line()
+
+	// _jsonArrayRemoveAt
+	f.Func().Id("_jsonArrayRemoveAt").Params(
+		jen.Id("jsonStr").String(),
+		jen.Id("idx").Int(),
+	).String().Block(
+		jen.Var().Id("arr").Index().Interface(),
+		jen.Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("arr"),
+		),
+		jen.If(jen.Id("idx").Op("<").Lit(0)).Block(
+			jen.Id("idx").Op("=").Len(jen.Id("arr")).Op("+").Id("idx"),
+		),
+		jen.If(jen.Id("idx").Op(">=").Lit(0).Op("&&").Id("idx").Op("<").Len(jen.Id("arr"))).Block(
+			jen.Id("arr").Op("=").Append(jen.Id("arr").Index(jen.Op(":").Id("idx")), jen.Id("arr").Index(jen.Id("idx").Op("+").Lit(1).Op(":")).Op("...")),
+		),
+		jen.List(jen.Id("result"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("arr")),
+		jen.Return(jen.String().Parens(jen.Id("result"))),
+	)
+	f.Line()
+
+	// Object JSON helpers
+	// _jsonObjectLen
+	f.Func().Id("_jsonObjectLen").Params(jen.Id("jsonStr").String()).Int().Block(
+		jen.Var().Id("m").Map(jen.String()).Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("m"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(0)),
+		),
+		jen.Return(jen.Len(jen.Id("m"))),
+	)
+	f.Line()
+
+	// _jsonObjectKeys
+	f.Func().Id("_jsonObjectKeys").Params(jen.Id("jsonStr").String()).Index().String().Block(
+		jen.Var().Id("m").Map(jen.String()).Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("m"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Nil()),
+		),
+		jen.Return(jen.Id("_mapKeys").Call(jen.Id("m"))),
+	)
+	f.Line()
+
+	// _jsonObjectValues
+	f.Func().Id("_jsonObjectValues").Params(jen.Id("jsonStr").String()).Index().Interface().Block(
+		jen.Var().Id("m").Map(jen.String()).Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("m"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Nil()),
+		),
+		jen.Return(jen.Id("_mapValues").Call(jen.Id("m"))),
+	)
+	f.Line()
+
+	// _jsonObjectIsEmpty
+	f.Func().Id("_jsonObjectIsEmpty").Params(jen.Id("jsonStr").String()).Bool().Block(
+		jen.Var().Id("m").Map(jen.String()).Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("m"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.True()),
+		),
+		jen.Return(jen.Len(jen.Id("m")).Op("==").Lit(0)),
+	)
+	f.Line()
+
+	// _jsonObjectAt
+	f.Func().Id("_jsonObjectAt").Params(
+		jen.Id("jsonStr").String(),
+		jen.Id("key").String(),
+	).String().Block(
+		jen.Var().Id("m").Map(jen.String()).Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("m"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.If(jen.List(jen.Id("v"), jen.Id("ok")).Op(":=").Id("m").Index(jen.Id("key")).Op(";").Id("ok")).Block(
+			jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("v"))),
+		),
+		jen.Return(jen.Lit("")),
+	)
+	f.Line()
+
+	// _jsonObjectAtPut
+	f.Func().Id("_jsonObjectAtPut").Params(
+		jen.Id("jsonStr").String(),
+		jen.Id("key").String(),
+		jen.Id("val").Interface(),
+	).String().Block(
+		jen.Var().Id("m").Map(jen.String()).Interface(),
+		jen.Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("m"),
+		),
+		jen.If(jen.Id("m").Op("==").Nil()).Block(
+			jen.Id("m").Op("=").Make(jen.Map(jen.String()).Interface()),
+		),
+		jen.Id("m").Index(jen.Id("key")).Op("=").Id("val"),
+		jen.List(jen.Id("result"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("m")),
+		jen.Return(jen.String().Parens(jen.Id("result"))),
+	)
+	f.Line()
+
+	// _jsonObjectHasKey
+	f.Func().Id("_jsonObjectHasKey").Params(
+		jen.Id("jsonStr").String(),
+		jen.Id("key").String(),
+	).Bool().Block(
+		jen.Var().Id("m").Map(jen.String()).Interface(),
+		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("m"),
+		).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.False()),
+		),
+		jen.List(jen.Id("_"), jen.Id("ok")).Op(":=").Id("m").Index(jen.Id("key")),
+		jen.Return(jen.Id("ok")),
+	)
+	f.Line()
+
+	// _jsonObjectRemoveKey
+	f.Func().Id("_jsonObjectRemoveKey").Params(
+		jen.Id("jsonStr").String(),
+		jen.Id("key").String(),
+	).String().Block(
+		jen.Var().Id("m").Map(jen.String()).Interface(),
+		jen.Qual("encoding/json", "Unmarshal").Call(
+			jen.Index().Byte().Parens(jen.Id("jsonStr")),
+			jen.Op("&").Id("m"),
+		),
+		jen.Delete(jen.Id("m"), jen.Id("key")),
+		jen.List(jen.Id("result"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("m")),
+		jen.Return(jen.String().Parens(jen.Id("result"))),
+	)
 }
 
 // generateEnvironmentMethod generates specialized SQLite-based implementations

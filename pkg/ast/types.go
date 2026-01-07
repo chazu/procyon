@@ -131,9 +131,13 @@ const (
 	TokenNE      = "NE"      // !=
 	TokenEquals  = "EQUALS"  // = (single equals, for comparisons)
 	TokenPercent = "PERCENT" // % (modulo)
+	TokenDot     = "DOT"     // . (statement separator)
 
 	// Control flow
 	TokenKeyword = "KEYWORD" // identifier followed by colon (e.g., "ifTrue:")
 	TokenLParen  = "LPAREN"  // (
 	TokenRParen  = "RPAREN"  // )
+
+	// Blocks
+	TokenBlockParam = "BLOCK_PARAM" // :param in [:param | body]
 )

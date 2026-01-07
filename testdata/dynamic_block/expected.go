@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed Counter.trash
+//go:embed BlockTest.trash
 var _sourceCode string
 
 var _contentHash string
@@ -31,19 +31,18 @@ func init() {
 
 var ErrUnknownSelector = errors.New("unknown selector")
 
-type Counter struct {
+type BlockTest struct {
 	Class     string   `json:"class"`
 	CreatedAt string   `json:"created_at"`
 	Vars      []string `json:"_vars"`
-	Value     string   `json:"value"`
-	Step      string   `json:"step"`
+	Items     string   `json:"items"`
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
-		fmt.Fprintln(os.Stderr, "       Counter.native --source")
-		fmt.Fprintln(os.Stderr, "       Counter.native --hash")
+		fmt.Fprintln(os.Stderr, "Usage: BlockTest.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "       BlockTest.native --source")
+		fmt.Fprintln(os.Stderr, "       BlockTest.native --hash")
 		os.Exit(1)
 	}
 
@@ -55,7 +54,7 @@ func main() {
 		fmt.Println(_contentHash)
 		return
 	case "--info":
-		fmt.Printf("Class: Counter\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
+		fmt.Printf("Class: BlockTest\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
 		return
 	case "--serve":
 		runServeMode()
@@ -63,7 +62,7 @@ func main() {
 	}
 
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: BlockTest.native <instance_id> <selector> [args...]")
 		os.Exit(1)
 	}
 
@@ -71,7 +70,7 @@ func main() {
 	selector := os.Args[2]
 	args := os.Args[3:]
 
-	if receiver == "Counter" || receiver == "Counter" {
+	if receiver == "BlockTest" || receiver == "BlockTest" {
 		result, err := dispatchClass(selector, args)
 		if err != nil {
 			if errors.Is(err, ErrUnknownSelector) {
@@ -133,20 +132,20 @@ func openDB() (*sql.DB, error) {
 	return sql.Open("sqlite3", dbPath)
 }
 
-func loadInstance(db *sql.DB, id string) (*Counter, error) {
+func loadInstance(db *sql.DB, id string) (*BlockTest, error) {
 	var data string
 	err := db.QueryRow("SELECT data FROM instances WHERE id = ?", id).Scan(&data)
 	if err != nil {
 		return nil, err
 	}
-	var instance Counter
+	var instance BlockTest
 	if err := json.Unmarshal([]byte(data), &instance); err != nil {
 		return nil, err
 	}
 	return &instance, nil
 }
 
-func saveInstance(db *sql.DB, id string, instance *Counter) error {
+func saveInstance(db *sql.DB, id string, instance *BlockTest) error {
 	data, err := json.Marshal(instance)
 	if err != nil {
 		return err
@@ -160,7 +159,7 @@ func generateInstanceID(className string) string {
 	return strings.ToLower(className) + "_" + uuid
 }
 
-func createInstance(db *sql.DB, id string, instance *Counter) error {
+func createInstance(db *sql.DB, id string, instance *BlockTest) error {
 	data, err := json.Marshal(instance)
 	if err != nil {
 		return err
@@ -242,7 +241,7 @@ func respond(resp ServeResponse) {
 }
 
 func handleServeRequest(db *sql.DB, req *ServeRequest) ServeResponse {
-	if req.Instance == "" || req.Instance == "Counter" || req.Instance == "Counter" {
+	if req.Instance == "" || req.Instance == "BlockTest" || req.Instance == "BlockTest" {
 		result, err := dispatchClass(req.Selector, req.Args)
 		if err != nil {
 			if errors.Is(err, ErrUnknownSelector) {
@@ -259,7 +258,7 @@ func handleServeRequest(db *sql.DB, req *ServeRequest) ServeResponse {
 		}
 	}
 
-	var instance Counter
+	var instance BlockTest
 	if err := json.Unmarshal([]byte(req.Instance), &instance); err != nil {
 		return ServeResponse{
 			Error:    "invalid instance JSON: " + err.Error(),
@@ -603,40 +602,29 @@ func invokeBlock(blockID string, args ...interface{}) string {
 	return strings.TrimSpace(string(output))
 }
 
-func dispatch(c *Counter, instanceID string, selector string, args []string) (string, error) {
+func dispatch(c *BlockTest, instanceID string, selector string, args []string) (string, error) {
 	switch selector {
 	case "class":
-		return "Counter", nil
+		return "BlockTest", nil
 	case "id":
 		return instanceID, nil
 	case "delete":
 		return instanceID, nil
-	case "getValue":
-		return c.GetValue(), nil
-	case "getStep":
-		return c.GetStep(), nil
-	case "setValue_":
+	case "eachDo":
 		if len(args) < 1 {
-			return "", fmt.Errorf("setValue_ requires 1 argument")
+			return "", fmt.Errorf("eachDo requires 1 argument")
 		}
-		return c.SetValue(args[0])
-	case "setStep_":
+		return c.EachDo(args[0])
+	case "collectWith":
 		if len(args) < 1 {
-			return "", fmt.Errorf("setStep_ requires 1 argument")
+			return "", fmt.Errorf("collectWith requires 1 argument")
 		}
-		return c.SetStep(args[0])
-	case "increment":
-		return c.Increment(), nil
-	case "decrement":
-		return c.Decrement(), nil
-	case "incrementBy_":
+		return c.CollectWith(args[0])
+	case "selectWith":
 		if len(args) < 1 {
-			return "", fmt.Errorf("incrementBy_ requires 1 argument")
+			return "", fmt.Errorf("selectWith requires 1 argument")
 		}
-		return c.IncrementBy(args[0])
-	case "reset":
-		c.Reset()
-		return "", nil
+		return c.SelectWith(args[0])
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
@@ -645,12 +633,11 @@ func dispatch(c *Counter, instanceID string, selector string, args []string) (st
 func dispatchClass(selector string, args []string) (string, error) {
 	switch selector {
 	case "new":
-		id := generateInstanceID("Counter")
-		instance := &Counter{
-			Class:     "Counter",
+		id := generateInstanceID("BlockTest")
+		instance := &BlockTest{
+			Class:     "BlockTest",
 			CreatedAt: time.Now().Format(time.RFC3339),
-			Step:      "1",
-			Value:     "0",
+			Items:     "[]",
 		}
 		db, err := openDB()
 		if err != nil {
@@ -661,71 +648,58 @@ func dispatchClass(selector string, args []string) (string, error) {
 			return "", err
 		}
 		return id, nil
-	case "description":
-		return Description(), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
 }
 
-func (c *Counter) GetValue() string {
-	return _toStr(toInt(c.Value) + toInt(0))
-}
-
-func (c *Counter) GetStep() string {
-	return _toStr(toInt(c.Step) + toInt(0))
-}
-
-func (c *Counter) SetValue(val string) (string, error) {
-	valInt, err := strconv.Atoi(val)
+func (c *BlockTest) EachDo(aBlock string) (string, error) {
+	aBlockInt, err := strconv.Atoi(aBlock)
 	if err != nil {
 		return "", err
 	}
-	_ = valInt
-	c.Value = strconv.Itoa(toInt(valInt) + toInt(0))
+	_ = aBlockInt
+	var _items []interface{}
+	json.Unmarshal([]byte(c.Items), &_items)
+	for _, _elem := range _items {
+		_ = invokeBlock(aBlock, _elem)
+	}
 	return "", nil
 }
 
-func (c *Counter) SetStep(val string) (string, error) {
-	valInt, err := strconv.Atoi(val)
+func (c *BlockTest) CollectWith(aBlock string) (string, error) {
+	aBlockInt, err := strconv.Atoi(aBlock)
 	if err != nil {
 		return "", err
 	}
-	_ = valInt
-	c.Step = strconv.Itoa(toInt(valInt) + toInt(0))
-	return "", nil
+	_ = aBlockInt
+	var _items []interface{}
+	json.Unmarshal([]byte(c.Items), &_items)
+	_results := make([]interface{}, 0)
+	for _, _elem := range _items {
+		_result := invokeBlock(aBlock, _elem)
+		_results = append(_results, _result)
+	}
+	_resultJSON, _ := json.Marshal(_results)
+	return string(_resultJSON), nil
 }
 
-func (c *Counter) Increment() string {
-	var newVal interface{}
-	newVal = toInt(c.Value) + toInt(c.Step)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return _toStr(toInt(newVal) + toInt(0))
-}
-
-func (c *Counter) Decrement() string {
-	var newVal interface{}
-	newVal = toInt(c.Value) - toInt(c.Step)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return _toStr(toInt(newVal) + toInt(0))
-}
-
-func (c *Counter) IncrementBy(amount string) (string, error) {
-	amountInt, err := strconv.Atoi(amount)
+func (c *BlockTest) SelectWith(aBlock string) (string, error) {
+	aBlockInt, err := strconv.Atoi(aBlock)
 	if err != nil {
 		return "", err
 	}
-	_ = amountInt
-	var newVal interface{}
-	newVal = toInt(c.Value) + toInt(amountInt)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return "", nil
-}
-
-func (c *Counter) Reset() {
-	c.Value = strconv.Itoa(toInt(0) + toInt(0))
-}
-
-func Description() string {
-	return "A simple counter"
+	_ = aBlockInt
+	var _items []interface{}
+	json.Unmarshal([]byte(c.Items), &_items)
+	_results := make([]interface{}, 0)
+	for _, _elem := range _items {
+		_result := invokeBlock(aBlock, _elem)
+		// Non-empty string result means true
+		if _result != "" {
+			_results = append(_results, _elem)
+		}
+	}
+	_resultJSON, _ := json.Marshal(_results)
+	return string(_resultJSON), nil
 }
