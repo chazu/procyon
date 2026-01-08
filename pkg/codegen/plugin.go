@@ -18,11 +18,17 @@ func GeneratePlugin(class *ast.Class) *Result {
 		warnings:     []string{},
 		skipped:      []SkippedMethod{},
 		instanceVars: map[string]bool{},
+		jsonVars:     map[string]bool{},
 	}
 
-	// Build instance var lookup
+	// Build instance var lookup and track JSON-typed vars
 	for _, iv := range class.InstanceVars {
 		g.instanceVars[iv.Name] = true
+		// Check if default value is JSON object or array
+		defaultVal := iv.Default.Value
+		if len(defaultVal) > 0 && (defaultVal[0] == '{' || defaultVal[0] == '[') {
+			g.jsonVars[iv.Name] = true
+		}
 	}
 
 	return g.generatePlugin()
@@ -51,6 +57,14 @@ func (g *generator) generatePlugin() *Result {
 
 	// Helper functions (same as binary mode, minus main-specific ones)
 	g.generatePluginHelpers(f)
+	f.Line()
+
+	// Type conversion helpers (toInt, toBool, invokeBlock)
+	g.generateTypeHelpers(f)
+	f.Line()
+
+	// JSON primitive helpers (_toStr, _arrayFirst, etc.)
+	g.generateJSONHelpers(f)
 	f.Line()
 
 	// Compile methods
@@ -110,27 +124,25 @@ func (g *generator) generatePluginExports(f *jen.File) {
 
 	// //export Dispatch
 	// Dispatch handles all method calls for this class
+	// Returns a single JSON string with result and exit_code to avoid struct return ABI issues
 	f.Comment("//export Dispatch")
 	f.Func().Id("Dispatch").Params(
 		jen.Id("instanceJSON").Op("*").Qual("C", "char"),
 		jen.Id("selector").Op("*").Qual("C", "char"),
 		jen.Id("argsJSON").Op("*").Qual("C", "char"),
-	).Parens(jen.List(
-		jen.Id("resultJSON").Op("*").Qual("C", "char"),
-		jen.Id("exitCode").Qual("C", "int"),
-	)).Block(
+	).Op("*").Qual("C", "char").Block(
 		// Convert C strings to Go strings
 		jen.Id("instanceStr").Op(":=").Qual("C", "GoString").Call(jen.Id("instanceJSON")),
 		jen.Id("selectorStr").Op(":=").Qual("C", "GoString").Call(jen.Id("selector")),
 		jen.Id("argsStr").Op(":=").Qual("C", "GoString").Call(jen.Id("argsJSON")),
 		jen.Line(),
-		// Call internal dispatch
-		jen.List(jen.Id("result"), jen.Id("code")).Op(":=").Id("dispatchInternal").Call(
+		// Call internal dispatch - returns JSON with embedded exit_code
+		jen.Id("result").Op(":=").Id("dispatchInternal").Call(
 			jen.Id("instanceStr"),
 			jen.Id("selectorStr"),
 			jen.Id("argsStr"),
 		),
-		jen.Return(jen.Qual("C", "CString").Call(jen.Id("result")), jen.Qual("C", "int").Call(jen.Id("code"))),
+		jen.Return(jen.Qual("C", "CString").Call(jen.Id("result"))),
 	)
 }
 
@@ -187,11 +199,12 @@ func (g *generator) generatePluginHelpers(f *jen.File) {
 	f.Line()
 
 	// dispatchInternal - main entry point for plugin calls
+	// Returns a single JSON string with exit_code embedded to avoid struct return ABI issues
 	f.Func().Id("dispatchInternal").Params(
 		jen.Id("instanceJSON").String(),
 		jen.Id("selector").String(),
 		jen.Id("argsJSON").String(),
-	).Parens(jen.List(jen.String(), jen.Int())).Block(
+	).String().Block(
 		// Parse args
 		jen.Var().Id("args").Index().String(),
 		jen.Qual("encoding/json", "Unmarshal").Call(jen.Index().Byte().Parens(jen.Id("argsJSON")), jen.Op("&").Id("args")),
@@ -201,34 +214,57 @@ func (g *generator) generatePluginHelpers(f *jen.File) {
 			jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatchClass").Call(jen.Id("selector"), jen.Id("args")),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.If(jen.Qual("errors", "Is").Call(jen.Err(), jen.Id("ErrUnknownSelector"))).Block(
-					jen.Return(jen.Lit(""), jen.Lit(200)),
+					jen.Return(jen.Lit(`{"exit_code":200}`)),
 				),
-				jen.Return(jen.Lit(""), jen.Lit(1)),
+				jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"exit_code":1,"error":%q}`), jen.Err().Dot("Error").Call())),
 			),
-			jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"result":%q}`), jen.Id("result")), jen.Lit(0)),
+			jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"result":%q,"exit_code":0}`), jen.Id("result"))),
 		),
 		jen.Line(),
 		// Instance method - parse instance JSON
 		jen.Var().Id("instance").Id(className),
 		jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(jen.Index().Byte().Parens(jen.Id("instanceJSON")), jen.Op("&").Id("instance")).Op(";").Err().Op("!=").Nil()).Block(
-			jen.Return(jen.Lit(""), jen.Lit(1)),
+			jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"exit_code":1,"error":%q}`), jen.Err().Dot("Error").Call())),
 		),
 		jen.Line(),
 		// Dispatch to instance method
 		jen.List(jen.Id("result"), jen.Err()).Op(":=").Id("dispatch").Call(jen.Op("&").Id("instance"), jen.Id("selector"), jen.Id("args")),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.If(jen.Qual("errors", "Is").Call(jen.Err(), jen.Id("ErrUnknownSelector"))).Block(
-				jen.Return(jen.Lit(""), jen.Lit(200)),
+				jen.Return(jen.Lit(`{"exit_code":200}`)),
 			),
-			jen.Return(jen.Lit(""), jen.Lit(1)),
+			jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"exit_code":1,"error":%q}`), jen.Err().Dot("Error").Call())),
 		),
 		jen.Line(),
-		// Return updated instance + result
+		// Return updated instance + result with exit_code
 		jen.List(jen.Id("updatedJSON"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Op("&").Id("instance")),
 		jen.Return(
-			jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"instance":%s,"result":%q}`), jen.String().Parens(jen.Id("updatedJSON")), jen.Id("result")),
-			jen.Lit(0),
+			jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"instance":%s,"result":%q,"exit_code":0}`), jen.String().Parens(jen.Id("updatedJSON")), jen.Id("result")),
 		),
+	)
+	f.Line()
+
+	// sendMessage - shell out to bash runtime for non-self message sends
+	// Returns just string - errors are silently ignored to match bash behavior and simplify usage in expressions
+	f.Func().Id("sendMessage").Params(
+		jen.Id("receiver").Interface(),
+		jen.Id("selector").String(),
+		jen.Id("args").Op("...").Interface(),
+	).String().Block(
+		// Convert receiver to string
+		jen.Id("receiverStr").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("receiver")),
+		// Build command args: @ receiver selector args...
+		jen.Id("cmdArgs").Op(":=").Index().String().Values(jen.Id("receiverStr"), jen.Id("selector")),
+		jen.For(jen.List(jen.Id("_"), jen.Id("arg")).Op(":=").Range().Id("args")).Block(
+			jen.Id("cmdArgs").Op("=").Append(jen.Id("cmdArgs"), jen.Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("arg"))),
+		),
+		// Find the trashtalk dispatch script
+		jen.List(jen.Id("home"), jen.Id("_")).Op(":=").Qual("os", "UserHomeDir").Call(),
+		jen.Id("dispatchScript").Op(":=").Qual("path/filepath", "Join").Call(jen.Id("home"), jen.Lit(".trashtalk"), jen.Lit("bin"), jen.Lit("trash-send")),
+		// Execute: trash-send receiver selector args...
+		jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Id("dispatchScript"), jen.Id("cmdArgs").Op("...")),
+		jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+		jen.Return(jen.Qual("strings", "TrimSpace").Call(jen.String().Parens(jen.Id("output")))),
 	)
 }
 

@@ -1,10 +1,13 @@
 // trashtalk-daemon - Dynamic plugin loader for Trashtalk
 //
 // This daemon loads c-shared plugins (.dylib/.so) on demand and handles
-// method dispatch via stdin/stdout JSON protocol.
+// method dispatch via Unix socket or stdin/stdout JSON protocol.
 //
 // Build: go build ./cmd/trashtalk-daemon
-// Usage: trashtalk-daemon [--plugin-dir DIR]
+// Usage:
+//   trashtalk-daemon [--plugin-dir DIR]                    # stdin/stdout mode
+//   trashtalk-daemon --socket /tmp/trashtalk.sock          # socket mode
+//   trashtalk-daemon --socket /tmp/trashtalk.sock --idle-timeout 300
 package main
 
 import (
@@ -12,10 +15,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/jamesits/goinvoke"
@@ -52,14 +59,19 @@ type Response struct {
 
 // Daemon manages plugin loading and dispatch
 type Daemon struct {
-	plugins   map[string]*Plugin // className -> plugin
-	pluginDir string
-	mu        sync.RWMutex
+	plugins     map[string]*Plugin // className -> plugin
+	pluginDir   string
+	mu          sync.RWMutex
+	idleTimeout time.Duration
+	idleTimer   *time.Timer
+	timerMu     sync.Mutex
 }
 
 var (
-	pluginDir = flag.String("plugin-dir", "", "Directory containing .dylib/.so plugins")
-	debug     = flag.Bool("debug", false, "Enable debug output to stderr")
+	pluginDir   = flag.String("plugin-dir", "", "Directory containing .dylib/.so plugins")
+	socketPath  = flag.String("socket", "", "Unix socket path (enables socket mode)")
+	idleTimeout = flag.Int("idle-timeout", 300, "Idle timeout in seconds (socket mode only, 0 = no timeout)")
+	debug       = flag.Bool("debug", false, "Enable debug output to stderr")
 )
 
 func main() {
@@ -73,19 +85,24 @@ func main() {
 	}
 
 	d := &Daemon{
-		plugins:   make(map[string]*Plugin),
-		pluginDir: dir,
+		plugins:     make(map[string]*Plugin),
+		pluginDir:   dir,
+		idleTimeout: time.Duration(*idleTimeout) * time.Second,
 	}
 
 	if *debug {
 		fmt.Fprintf(os.Stderr, "trashtalk-daemon: plugin-dir=%s\n", dir)
 	}
 
-	d.Run()
+	if *socketPath != "" {
+		d.RunSocket(*socketPath)
+	} else {
+		d.RunStdin()
+	}
 }
 
-// Run processes JSON requests from stdin
-func (d *Daemon) Run() {
+// RunStdin processes JSON requests from stdin (original mode)
+func (d *Daemon) RunStdin() {
 	scanner := bufio.NewScanner(os.Stdin)
 	// Increase buffer for large instance JSON
 	buf := make([]byte, 1024*1024) // 1MB
@@ -99,7 +116,7 @@ func (d *Daemon) Run() {
 
 		var req Request
 		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			d.respond(Response{ExitCode: 1, Error: "invalid JSON: " + err.Error()})
+			d.respond(os.Stdout, Response{ExitCode: 1, Error: "invalid JSON: " + err.Error()})
 			continue
 		}
 
@@ -108,7 +125,7 @@ func (d *Daemon) Run() {
 		}
 
 		resp := d.HandleRequest(req)
-		d.respond(resp)
+		d.respond(os.Stdout, resp)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -116,9 +133,135 @@ func (d *Daemon) Run() {
 	}
 }
 
-func (d *Daemon) respond(resp Response) {
+// RunSocket runs the daemon in Unix socket mode
+func (d *Daemon) RunSocket(path string) {
+	// Remove existing socket file
+	os.Remove(path)
+
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: failed to listen on %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	defer listener.Close()
+	defer os.Remove(path)
+
+	// Make socket world-writable so any process can connect
+	os.Chmod(path, 0777)
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: listening on %s (idle-timeout=%v)\n", path, d.idleTimeout)
+	}
+
+	// Write PID file
+	pidPath := path + ".pid"
+	os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
+	defer os.Remove(pidPath)
+
+	// Handle shutdown signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		if *debug {
+			fmt.Fprintf(os.Stderr, "trashtalk-daemon: shutting down on signal\n")
+		}
+		listener.Close()
+	}()
+
+	// Start idle timer if timeout is set
+	if d.idleTimeout > 0 {
+		d.startIdleTimer(listener)
+	}
+
+	// Accept connections
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			// Check if it's because we're shutting down
+			if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+				break
+			}
+			if *debug {
+				fmt.Fprintf(os.Stderr, "trashtalk-daemon: accept error: %v\n", err)
+			}
+			continue
+		}
+
+		// Reset idle timer on each connection
+		d.resetIdleTimer(listener)
+
+		// Handle connection (one request per connection)
+		d.handleConnection(conn)
+	}
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: exiting\n")
+	}
+}
+
+// handleConnection handles a single request on a connection
+func (d *Daemon) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Set read deadline to prevent hanging connections
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		if *debug {
+			fmt.Fprintf(os.Stderr, "trashtalk-daemon: read error: %v\n", err)
+		}
+		return
+	}
+
+	var req Request
+	if err := json.Unmarshal([]byte(line), &req); err != nil {
+		d.respond(conn, Response{ExitCode: 1, Error: "invalid JSON: " + err.Error()})
+		return
+	}
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: request class=%s selector=%s\n", req.Class, req.Selector)
+	}
+
+	resp := d.HandleRequest(req)
+	d.respond(conn, resp)
+}
+
+// startIdleTimer starts the idle timeout timer
+func (d *Daemon) startIdleTimer(listener net.Listener) {
+	d.timerMu.Lock()
+	defer d.timerMu.Unlock()
+
+	d.idleTimer = time.AfterFunc(d.idleTimeout, func() {
+		if *debug {
+			fmt.Fprintf(os.Stderr, "trashtalk-daemon: idle timeout reached, shutting down\n")
+		}
+		listener.Close()
+	})
+}
+
+// resetIdleTimer resets the idle timeout timer
+func (d *Daemon) resetIdleTimer(listener net.Listener) {
+	d.timerMu.Lock()
+	defer d.timerMu.Unlock()
+
+	if d.idleTimer != nil {
+		d.idleTimer.Stop()
+		d.idleTimer = time.AfterFunc(d.idleTimeout, func() {
+			if *debug {
+				fmt.Fprintf(os.Stderr, "trashtalk-daemon: idle timeout reached, shutting down\n")
+			}
+			listener.Close()
+		})
+	}
+}
+
+func (d *Daemon) respond(w interface{ Write([]byte) (int, error) }, resp Response) {
 	output, _ := json.Marshal(resp)
-	fmt.Println(string(output))
+	w.Write(append(output, '\n'))
 }
 
 // HandleRequest processes a single dispatch request
@@ -136,26 +279,31 @@ func (d *Daemon) HandleRequest(req Request) Response {
 	// Convert args to JSON
 	argsJSON, _ := json.Marshal(req.Args)
 
-	// Call plugin's Dispatch function
-	result, exitCode := d.callDispatch(plugin, req.Instance, req.Selector, string(argsJSON))
+	// Call plugin's Dispatch function - returns JSON with embedded exit_code
+	result := d.callDispatch(plugin, req.Instance, req.Selector, string(argsJSON))
 
-	if exitCode == 200 {
-		return Response{ExitCode: 200}
-	}
-
-	if exitCode != 0 {
-		return Response{ExitCode: int(exitCode), Error: result}
+	if result == "" {
+		return Response{ExitCode: 1, Error: "empty response from plugin"}
 	}
 
 	// Parse result JSON from plugin
-	// The plugin returns: {"instance":{...},"result":"value"}
+	// The plugin returns: {"instance":{...},"result":"value","exit_code":0}
 	var resultData struct {
 		Instance json.RawMessage `json:"instance"`
 		Result   string          `json:"result"`
+		ExitCode int             `json:"exit_code"`
+		Error    string          `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(result), &resultData); err != nil {
-		// Result might be plain string
-		return Response{Result: result, ExitCode: 0}
+		return Response{ExitCode: 1, Error: "invalid JSON from plugin: " + err.Error()}
+	}
+
+	if resultData.ExitCode == 200 {
+		return Response{ExitCode: 200}
+	}
+
+	if resultData.ExitCode != 0 {
+		return Response{ExitCode: resultData.ExitCode, Error: resultData.Error}
 	}
 
 	return Response{
@@ -211,53 +359,23 @@ func (d *Daemon) LoadPlugin(className string) (*Plugin, error) {
 }
 
 // callDispatch calls the plugin's Dispatch function via FFI
-func (d *Daemon) callDispatch(plugin *Plugin, instance, selector, argsJSON string) (string, int32) {
+// The plugin returns a single JSON string with exit_code embedded to avoid struct return ABI issues
+func (d *Daemon) callDispatch(plugin *Plugin, instance, selector, argsJSON string) string {
 	// Convert Go strings to C strings (null-terminated)
 	instancePtr := cstring(instance)
 	selectorPtr := cstring(selector)
 	argsPtr := cstring(argsJSON)
 	defer freeStrings(instancePtr, selectorPtr, argsPtr)
 
-	// Call Dispatch(instanceJSON, selector, argsJSON) -> (resultJSON, exitCode)
-	// The c-shared function returns a struct, which syscall.Call handles as two return values
+	// Call Dispatch(instanceJSON, selector, argsJSON) -> *char (JSON with embedded exit_code)
 	ret, _, _ := plugin.funcs.Dispatch.Call(
 		uintptr(instancePtr),
 		uintptr(selectorPtr),
 		uintptr(argsPtr),
 	)
 
-	// The return is a pointer to the result struct
-	// For c-shared with multiple returns, we get them packed
-	// First return is the char* result, second is the int exit code
-	// Actually, goinvoke returns them as ret and ret2
-	// Let me handle this more carefully...
-
-	// The Dispatch function returns (char*, int)
-	// In c-shared ABI, this becomes a struct return
-	// goinvoke's Call() returns (r1, r2, err) where r1/r2 are the return values
-	resultPtr := ret
-
-	// For the exit code, we need to make another call or use the struct return
-	// Actually looking at the header: struct Dispatch_return { char* r0; int r1; }
-	// goinvoke.Call should return these in ret1 and ret2
-
-	// Let's check if there's a second return
-	// Since goinvoke follows syscall convention, ret is first value
-	// We need to look at how the struct return works...
-
-	// For now, assume ret is the result string pointer
-	// The exit code might need special handling
-
-	result := gostring(unsafe.Pointer(resultPtr))
-
-	// TODO: Properly extract exit code from struct return
-	// For now, check if result contains error indication
-	exitCode := int32(0)
-	if result == "" {
-		exitCode = 200 // Unknown selector signal
-	}
-
-	return result, exitCode
+	// The return is a single char* pointer to JSON
+	return gostring(unsafe.Pointer(ret))
 }
 
 // cstring converts a Go string to a C string (null-terminated byte slice)

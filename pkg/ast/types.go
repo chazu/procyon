@@ -70,8 +70,19 @@ type Method struct {
 	Selector string   `json:"selector"` // Method name (e.g., "increment", "setValue_")
 	Keywords []string `json:"keywords"` // For keyword methods (e.g., ["setValue"])
 	Args     []string `json:"args"`     // Argument names
+	Pragmas  []string `json:"pragmas"`  // Method pragmas (e.g., ["procyonOnly", "direct"])
 	Body     Block    `json:"body"`
 	Location Location `json:"location"`
+}
+
+// HasPragma checks if the method has a specific pragma.
+func (m *Method) HasPragma(pragma string) bool {
+	for _, p := range m.Pragmas {
+		if p == pragma {
+			return true
+		}
+	}
+	return false
 }
 
 // Block represents a method body as a token stream.
