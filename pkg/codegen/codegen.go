@@ -870,9 +870,17 @@ func (g *generator) generateDispatch(f *jen.File, methods []*compiledMethod) {
 		} else {
 			callExpr = jen.Id("c").Dot(m.goName).Call()
 			if m.hasReturn {
-				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
-					jen.Return(callExpr, jen.Nil()),
-				))
+				if m.returnsErr {
+					// Method returns (string, error) - don't add extra nil
+					cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+						jen.Return(callExpr),
+					))
+				} else {
+					// Method returns string only - add nil for error
+					cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+						jen.Return(callExpr, jen.Nil()),
+					))
+				}
 			} else {
 				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
 					callExpr,
@@ -2734,7 +2742,9 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 		),
 		jen.Var().Id("opts").Index().Qual("google.golang.org/grpc", "DialOption"),
 		jen.If(jen.Id("c").Dot("UsePlaintext").Op("==").Lit("yes")).Block(
-			jen.Id("opts").Op("=").Append(jen.Id("opts"), jen.Qual("google.golang.org/grpc/credentials/insecure", "NewCredentials").Call()),
+			jen.Id("opts").Op("=").Append(jen.Id("opts"), jen.Qual("google.golang.org/grpc", "WithTransportCredentials").Call(
+				jen.Qual("google.golang.org/grpc/credentials/insecure", "NewCredentials").Call(),
+			)),
 		),
 		jen.List(jen.Id("conn"), jen.Err()).Op(":=").Qual("google.golang.org/grpc", "NewClient").Call(
 			jen.Id("c").Dot("Address"),
@@ -2924,8 +2934,8 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("RPC failed: %w"), jen.Err())),
 		),
 		jen.Line(),
-		// Marshal response to JSON
-		jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Dot("MarshalJSON").Call(),
+		// Marshal response to JSON - type assert to *dynamic.Message since InvokeRpc returns proto.Message
+		jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Assert(jen.Op("*").Qual("github.com/jhump/protoreflect/dynamic", "Message")).Dot("MarshalJSON").Call(),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to marshal response: %w"), jen.Err())),
 		),
@@ -2979,7 +2989,7 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("stream error: %w"), jen.Err())),
 			),
-			jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Dot("MarshalJSON").Call(),
+			jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Assert(jen.Op("*").Qual("github.com/jhump/protoreflect/dynamic", "Message")).Dot("MarshalJSON").Call(),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Continue(),
 			),
@@ -3039,7 +3049,7 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("close error: %w"), jen.Err())),
 		),
-		jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Dot("MarshalJSON").Call(),
+		jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Assert(jen.Op("*").Qual("github.com/jhump/protoreflect/dynamic", "Message")).Dot("MarshalJSON").Call(),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.Return(jen.Lit(""), jen.Err()),
 		),
@@ -3085,7 +3095,7 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("recv error: %w"), jen.Err())),
 			),
-			jen.List(jen.Id("respJSON"), jen.Id("_")).Op(":=").Id("respMsg").Dot("MarshalJSON").Call(),
+			jen.List(jen.Id("respJSON"), jen.Id("_")).Op(":=").Id("respMsg").Assert(jen.Op("*").Qual("github.com/jhump/protoreflect/dynamic", "Message")).Dot("MarshalJSON").Call(),
 			jen.Id("reply").Op(":=").Id("invokeBlock").Call(jen.Id("handlerBlockID"), jen.String().Parens(jen.Id("respJSON"))),
 			jen.Id("count").Op("++"),
 			jen.If(jen.Op("!").Id("doneSending").Op("&&").Id("reply").Op("!=").Lit("")).Block(

@@ -67,6 +67,11 @@ func (g *generator) generatePlugin() *Result {
 	g.generateJSONHelpers(f)
 	f.Line()
 
+	// gRPC helper functions for GrpcClient class
+	if g.class.Name == "GrpcClient" {
+		g.generateGrpcHelpers(f)
+	}
+
 	// Compile methods
 	compiled := g.compileMethods()
 
@@ -302,9 +307,17 @@ func (g *generator) generatePluginDispatch(f *jen.File, methods []*compiledMetho
 		} else {
 			callExpr = jen.Id("c").Dot(m.goName).Call()
 			if m.hasReturn {
-				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
-					jen.Return(callExpr, jen.Nil()),
-				))
+				if m.returnsErr {
+					// Method returns (string, error) - don't add extra nil
+					cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+						jen.Return(callExpr),
+					))
+				} else {
+					// Method returns string only - add nil for error
+					cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+						jen.Return(callExpr, jen.Nil()),
+					))
+				}
 			} else {
 				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
 					callExpr,
@@ -361,9 +374,17 @@ func (g *generator) generatePluginClassDispatch(f *jen.File, methods []*compiled
 			// No args - direct call to package-level function
 			callExpr = jen.Id(m.goName).Call()
 			if m.hasReturn {
-				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
-					jen.Return(callExpr, jen.Nil()),
-				))
+				if m.returnsErr {
+					// Method returns (string, error) - don't add extra nil
+					cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+						jen.Return(callExpr),
+					))
+				} else {
+					// Method returns string only - add nil for error
+					cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+						jen.Return(callExpr, jen.Nil()),
+					))
+				}
 			} else {
 				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
 					callExpr,
