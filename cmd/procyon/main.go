@@ -14,10 +14,11 @@ import (
 )
 
 var (
-	strict  = flag.Bool("strict", false, "fail on unsupported constructs instead of warning")
-	dryRun  = flag.Bool("dry-run", false, "show what would be generated without outputting")
-	version = flag.Bool("version", false, "print version and exit")
-	mode    = flag.String("mode", "binary", "output mode: bash (Bash script), binary (Go standalone), or plugin (Go c-shared library)")
+	strict     = flag.Bool("strict", false, "fail on unsupported constructs instead of warning")
+	dryRun     = flag.Bool("dry-run", false, "show what would be generated without outputting")
+	version    = flag.Bool("version", false, "print version and exit")
+	mode       = flag.String("mode", "binary", "output mode: bash (Bash script), binary (Go standalone), or plugin (Go c-shared library)")
+	sourceFile = flag.String("source-file", "", "path to original source file for embedding (bash mode only)")
 )
 
 const versionStr = "0.7.0"
@@ -74,6 +75,15 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %s\n", e)
 			}
 			os.Exit(1)
+		}
+		// Read source file for embedding if provided
+		if *sourceFile != "" {
+			sourceBytes, err := os.ReadFile(*sourceFile)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not read source file for embedding: %v\n", err)
+			} else {
+				prog.SourceCode = string(sourceBytes)
+			}
 		}
 		backend := codegen.NewBashBackend()
 		code, err := backend.Generate(prog)

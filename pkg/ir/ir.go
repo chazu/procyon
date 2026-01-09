@@ -16,6 +16,7 @@ type Program struct {
 	InstanceVars  []VarDecl
 	ClassVars     []VarDecl
 	Methods       []Method
+	SourceCode    string // Original source code for embedding
 }
 
 // VarDecl represents a variable declaration with resolved type

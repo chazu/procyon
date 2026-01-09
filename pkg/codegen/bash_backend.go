@@ -103,7 +103,15 @@ func (b *BashBackend) generateSourceEmbedding() {
 	b.indent++
 	b.writeln("cat <<'__TRASHTALK_SOURCE_EOF__'")
 	// Note: heredoc content must not have leading indentation for the terminator
-	b.buf.WriteString("# Source not available in IR compilation mode\n")
+	if b.prog.SourceCode != "" {
+		b.buf.WriteString(b.prog.SourceCode)
+		// Ensure source ends with newline
+		if !strings.HasSuffix(b.prog.SourceCode, "\n") {
+			b.buf.WriteString("\n")
+		}
+	} else {
+		b.buf.WriteString("# Source not available in IR compilation mode\n")
+	}
 	b.buf.WriteString("__TRASHTALK_SOURCE_EOF__\n")
 	b.indent--
 	b.writeln("}")
@@ -746,10 +754,14 @@ func (b *BashBackend) formatInstanceVars() string {
 	return strings.Join(parts, " ")
 }
 
-// computeSourceHash computes a hash for the source (placeholder)
+// computeSourceHash computes a SHA-256 hash of the source code
 func (b *BashBackend) computeSourceHash() string {
-	// In a real implementation, this would hash the actual source
-	// For now, hash the program structure
+	// Hash the actual source code if available
+	if b.prog.SourceCode != "" {
+		hash := sha256.Sum256([]byte(b.prog.SourceCode))
+		return hex.EncodeToString(hash[:])
+	}
+	// Fallback: hash the program structure
 	data := fmt.Sprintf("%s%s%v", b.prog.Name, b.prog.Parent, b.prog.Traits)
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
