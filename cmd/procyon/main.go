@@ -10,13 +10,14 @@ import (
 
 	"github.com/chazu/procyon/pkg/ast"
 	"github.com/chazu/procyon/pkg/codegen"
+	"github.com/chazu/procyon/pkg/ir"
 )
 
 var (
 	strict  = flag.Bool("strict", false, "fail on unsupported constructs instead of warning")
 	dryRun  = flag.Bool("dry-run", false, "show what would be generated without outputting")
 	version = flag.Bool("version", false, "print version and exit")
-	mode    = flag.String("mode", "binary", "output mode: binary (standalone) or plugin (c-shared library)")
+	mode    = flag.String("mode", "binary", "output mode: bash (Bash script), binary (Go standalone), or plugin (Go c-shared library)")
 )
 
 const versionStr = "0.7.0"
@@ -61,12 +62,37 @@ func main() {
 	// Generate code based on mode
 	var result *codegen.Result
 	switch *mode {
+	case "bash":
+		// Bash mode: convert AST to IR, then generate Bash
+		builder := ir.NewBuilder(class)
+		prog, errs, warnings := builder.Build()
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		}
+		if len(errs) > 0 {
+			for _, e := range errs {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", e)
+			}
+			os.Exit(1)
+		}
+		backend := codegen.NewBashBackend()
+		code, err := backend.Generate(prog)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error generating Bash: %v\n", err)
+			os.Exit(1)
+		}
+		if *dryRun {
+			fmt.Fprintf(os.Stderr, "Dry run - would generate %d bytes of Bash code\n", len(code))
+			os.Exit(0)
+		}
+		fmt.Print(code)
+		return
 	case "binary":
 		result = codegen.Generate(class)
 	case "plugin":
 		result = codegen.GeneratePlugin(class)
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown mode %q (use 'binary' or 'plugin')\n", *mode)
+		fmt.Fprintf(os.Stderr, "Error: unknown mode %q (use 'bash', 'binary', or 'plugin')\n", *mode)
 		os.Exit(1)
 	}
 
