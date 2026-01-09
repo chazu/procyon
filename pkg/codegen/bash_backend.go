@@ -151,6 +151,10 @@ func (b *BashBackend) generateMethod(m *ir.Method) error {
 
 	// For raw methods, emit the raw Bash body directly
 	if m.IsRaw && m.RawBody != "" {
+		// First declare parameters (raw methods still need these)
+		for i, arg := range m.Args {
+			b.writef("local %s=\"$%d\"\n", arg.Name, i+1)
+		}
 		// Write each line of the raw body with proper indentation
 		lines := strings.Split(m.RawBody, "\n")
 		for _, line := range lines {

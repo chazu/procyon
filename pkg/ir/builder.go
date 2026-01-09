@@ -162,6 +162,15 @@ func (b *Builder) buildMethod(m *ast.Method) Method {
 	if m.Raw {
 		method.Backend = BackendBash
 		method.FallbackReason = "raw method requires Bash"
+		// Raw methods still need their arguments captured for parameter binding
+		for _, arg := range m.Args {
+			decl := VarDecl{
+				Name:    arg,
+				Type:    TypeAny,
+				IsParam: true,
+			}
+			method.Args = append(method.Args, decl)
+		}
 		// Convert tokens to raw Bash code
 		method.RawBody = tokensToRawBash(m.Body.Tokens)
 		return method
