@@ -85,6 +85,7 @@ type Method struct {
 	CanCompile     bool    // Can be compiled to Go?
 	FallbackReason string  // Why it needs Bash fallback
 	IsRaw          bool    // Raw method (no transformation)
+	RawBody        string  // For raw methods: the unprocessed Bash code
 }
 
 // MethodKind distinguishes instance and class methods

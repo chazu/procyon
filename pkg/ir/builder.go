@@ -158,11 +158,12 @@ func (b *Builder) buildMethod(m *ast.Method) Method {
 		CanCompile: !m.Raw, // Raw methods can't be compiled to Go
 	}
 
-	// If raw method, mark it for Bash backend
+	// If raw method, mark it for Bash backend and capture raw body
 	if m.Raw {
 		method.Backend = BackendBash
 		method.FallbackReason = "raw method requires Bash"
-		// Return early - no need to parse body
+		// Convert tokens to raw Bash code
+		method.RawBody = tokensToRawBash(m.Body.Tokens)
 		return method
 	}
 
@@ -707,6 +708,56 @@ func inferTypeFromDefault(def ast.DefaultValue) Type {
 	default:
 		return TypeAny
 	}
+}
+
+// tokensToRawBash converts AST tokens back to raw Bash code for raw methods.
+// This preserves the original Bash code without any transformation.
+func tokensToRawBash(tokens []ast.Token) string {
+	var result strings.Builder
+	prevLine := 0
+
+	for i, tok := range tokens {
+		// Handle line breaks
+		if tok.Line > prevLine && prevLine > 0 {
+			result.WriteString("\n")
+		}
+		prevLine = tok.Line
+
+		switch tok.Type {
+		case "NEWLINE":
+			result.WriteString("\n")
+
+		case "EQUALS":
+			// No space before or after equals in assignments
+			result.WriteString("=")
+
+		case "DSTRING", "SSTRING", "SUBSHELL", "VARIABLE":
+			// These tokens include their delimiters - just add them
+			result.WriteString(tok.Value)
+			// Add trailing space unless next is newline or end
+			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" {
+				result.WriteString(" ")
+			}
+
+		case "IDENTIFIER":
+			result.WriteString(tok.Value)
+			// Don't add space if next token is EQUALS (for assignment like id=...)
+			if i+1 < len(tokens) {
+				next := tokens[i+1]
+				if next.Type != "EQUALS" && next.Type != "NEWLINE" {
+					result.WriteString(" ")
+				}
+			}
+
+		default:
+			result.WriteString(tok.Value)
+			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" {
+				result.WriteString(" ")
+			}
+		}
+	}
+
+	return strings.TrimSpace(result.String())
 }
 
 // parseDefaultValue converts an AST default value to an IR Value.

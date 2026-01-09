@@ -140,6 +140,22 @@ func (b *BashBackend) generateMethod(m *ir.Method) error {
 	b.writef("__%s__%s() {\n", className, funcName)
 	b.indent++
 
+	// For raw methods, emit the raw Bash body directly
+	if m.IsRaw && m.RawBody != "" {
+		// Write each line of the raw body with proper indentation
+		lines := strings.Split(m.RawBody, "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" {
+				b.writef("%s\n", trimmed)
+			}
+		}
+		b.indent--
+		b.writeln("}")
+		b.writeln("")
+		return nil
+	}
+
 	// Declare parameters
 	for i, arg := range m.Args {
 		b.writef("local %s=\"$%d\"\n", arg.Name, i+1)
