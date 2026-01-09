@@ -32,11 +32,11 @@ func init() {
 var ErrUnknownSelector = errors.New("unknown selector")
 
 type Collection struct {
-	Class     string   `json:"class"`
-	CreatedAt string   `json:"created_at"`
-	Vars      []string `json:"_vars"`
-	Items     string   `json:"items"`
-	Data      string   `json:"data"`
+	Class     string          `json:"class"`
+	CreatedAt string          `json:"created_at"`
+	Vars      []string        `json:"_vars"`
+	Items     json.RawMessage `json:"items"`
+	Data      json.RawMessage `json:"data"`
 }
 
 func main() {
@@ -512,7 +512,8 @@ func _jsonObjectIsEmpty(jsonStr string) bool {
 	return len(m) == 0
 }
 
-func _jsonObjectAt(jsonStr string, key string) string {
+func _jsonObjectAt(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return ""
@@ -523,7 +524,8 @@ func _jsonObjectAt(jsonStr string, key string) string {
 	return ""
 }
 
-func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
+func _jsonObjectAtPut(jsonVal any, key string, val any) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	if m == nil {
@@ -534,7 +536,8 @@ func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
 	return string(result)
 }
 
-func _jsonObjectHasKey(jsonStr string, key string) bool {
+func _jsonObjectHasKey(jsonVal any, key string) bool {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return false
@@ -543,7 +546,8 @@ func _jsonObjectHasKey(jsonStr string, key string) bool {
 	return ok
 }
 
-func _jsonObjectRemoveKey(jsonStr string, key string) string {
+func _jsonObjectRemoveKey(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	delete(m, key)
@@ -676,73 +680,43 @@ func dispatchClass(selector string, args []string) (string, error) {
 }
 
 func (c *Collection) Push(value string) (string, error) {
-	valueInt, err := strconv.Atoi(value)
-	if err != nil {
-		return "", err
-	}
-	_ = valueInt
-	c.Items = _jsonArrayPush(c.Items, valueInt)
-	return _toStr(valueInt), nil
+	c.Items = json.RawMessage(_jsonArrayPush(string(c.Items), value))
+	return _toStr(value), nil
 }
 
 func (c *Collection) At(index string) (string, error) {
-	indexInt, err := strconv.Atoi(index)
-	if err != nil {
-		return "", err
-	}
-	_ = indexInt
-	return _jsonArrayAt(c.Items, toInt(indexInt)), nil
+	return _jsonArrayAt(string(c.Items), toInt(index)), nil
 }
 
 func (c *Collection) Size() string {
-	return strconv.Itoa(_jsonArrayLen(c.Items))
+	return strconv.Itoa(_jsonArrayLen(string(c.Items)))
 }
 
 func (c *Collection) IsEmpty() string {
-	return _boolToString(_jsonArrayIsEmpty(c.Items))
+	return _boolToString(_jsonArrayIsEmpty(string(c.Items)))
 }
 
 func (c *Collection) First() string {
-	return _jsonArrayFirst(c.Items)
+	return _jsonArrayFirst(string(c.Items))
 }
 
 func (c *Collection) Last() string {
-	return _jsonArrayLast(c.Items)
+	return _jsonArrayLast(string(c.Items))
 }
 
 func (c *Collection) SetData_to(key string, value string) (string, error) {
-	keyInt, err := strconv.Atoi(key)
-	if err != nil {
-		return "", err
-	}
-	_ = keyInt
-	valueInt, err := strconv.Atoi(value)
-	if err != nil {
-		return "", err
-	}
-	_ = valueInt
-	c.Data = _jsonObjectAtPut(c.Data, key, valueInt)
-	return _toStr(valueInt), nil
+	c.Data = json.RawMessage(_jsonObjectAtPut(string(c.Data), key, value))
+	return _toStr(value), nil
 }
 
 func (c *Collection) GetData(key string) (string, error) {
-	keyInt, err := strconv.Atoi(key)
-	if err != nil {
-		return "", err
-	}
-	_ = keyInt
-	return _jsonObjectAt(c.Data, key), nil
+	return _jsonObjectAt(string(c.Data), key), nil
 }
 
 func (c *Collection) HasKey(key string) (string, error) {
-	keyInt, err := strconv.Atoi(key)
-	if err != nil {
-		return "", err
-	}
-	_ = keyInt
-	return _boolToString(_jsonObjectHasKey(c.Data, key)), nil
+	return _boolToString(_jsonObjectHasKey(string(c.Data), key)), nil
 }
 
 func (c *Collection) DataSize() string {
-	return strconv.Itoa(_jsonObjectLen(c.Data))
+	return strconv.Itoa(_jsonObjectLen(string(c.Data)))
 }

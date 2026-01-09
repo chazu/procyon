@@ -32,11 +32,11 @@ func init() {
 var ErrUnknownSelector = errors.New("unknown selector")
 
 type ChainTest struct {
-	Class     string   `json:"class"`
-	CreatedAt string   `json:"created_at"`
-	Vars      []string `json:"_vars"`
-	Items     string   `json:"items"`
-	Data      string   `json:"data"`
+	Class     string          `json:"class"`
+	CreatedAt string          `json:"created_at"`
+	Vars      []string        `json:"_vars"`
+	Items     json.RawMessage `json:"items"`
+	Data      json.RawMessage `json:"data"`
 }
 
 func main() {
@@ -512,7 +512,8 @@ func _jsonObjectIsEmpty(jsonStr string) bool {
 	return len(m) == 0
 }
 
-func _jsonObjectAt(jsonStr string, key string) string {
+func _jsonObjectAt(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return ""
@@ -523,7 +524,8 @@ func _jsonObjectAt(jsonStr string, key string) string {
 	return ""
 }
 
-func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
+func _jsonObjectAtPut(jsonVal any, key string, val any) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	if m == nil {
@@ -534,7 +536,8 @@ func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
 	return string(result)
 }
 
-func _jsonObjectHasKey(jsonStr string, key string) bool {
+func _jsonObjectHasKey(jsonVal any, key string) bool {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return false
@@ -543,7 +546,8 @@ func _jsonObjectHasKey(jsonStr string, key string) bool {
 	return ok
 }
 
-func _jsonObjectRemoveKey(jsonStr string, key string) string {
+func _jsonObjectRemoveKey(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	delete(m, key)
@@ -653,40 +657,15 @@ func dispatchClass(selector string, args []string) (string, error) {
 }
 
 func (c *ChainTest) PushTwo_and(x string, y string) (string, error) {
-	xInt, err := strconv.Atoi(x)
-	if err != nil {
-		return "", err
-	}
-	_ = xInt
-	yInt, err := strconv.Atoi(y)
-	if err != nil {
-		return "", err
-	}
-	_ = yInt
-	c.Items = _jsonArrayPush(_jsonArrayPush(c.Items, xInt), yInt)
-	return strconv.Itoa(_jsonArrayLen(c.Items)), nil
+	c.Items = json.RawMessage(_jsonArrayPush(_jsonArrayPush(string(c.Items), x), y))
+	return strconv.Itoa(_jsonArrayLen(string(c.Items))), nil
 }
 
 func (c *ChainTest) PushThree_and_and(x string, y string, z string) (string, error) {
-	xInt, err := strconv.Atoi(x)
-	if err != nil {
-		return "", err
-	}
-	_ = xInt
-	yInt, err := strconv.Atoi(y)
-	if err != nil {
-		return "", err
-	}
-	_ = yInt
-	zInt, err := strconv.Atoi(z)
-	if err != nil {
-		return "", err
-	}
-	_ = zInt
-	c.Items = _jsonArrayPush(_jsonArrayPush(_jsonArrayPush(c.Items, xInt), yInt), zInt)
-	return strconv.Itoa(_jsonArrayLen(c.Items)), nil
+	c.Items = json.RawMessage(_jsonArrayPush(_jsonArrayPush(_jsonArrayPush(string(c.Items), x), y), z))
+	return strconv.Itoa(_jsonArrayLen(string(c.Items))), nil
 }
 
 func (c *ChainTest) ChainedUnary() string {
-	return strconv.Itoa(_jsonArrayLen(_jsonArrayPush(c.Items, 1)))
+	return strconv.Itoa(_jsonArrayLen(_jsonArrayPush(string(c.Items), 1)))
 }

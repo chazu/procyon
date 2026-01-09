@@ -510,7 +510,8 @@ func _jsonObjectIsEmpty(jsonStr string) bool {
 	return len(m) == 0
 }
 
-func _jsonObjectAt(jsonStr string, key string) string {
+func _jsonObjectAt(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return ""
@@ -521,7 +522,8 @@ func _jsonObjectAt(jsonStr string, key string) string {
 	return ""
 }
 
-func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
+func _jsonObjectAtPut(jsonVal any, key string, val any) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	if m == nil {
@@ -532,7 +534,8 @@ func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
 	return string(result)
 }
 
-func _jsonObjectHasKey(jsonStr string, key string) bool {
+func _jsonObjectHasKey(jsonVal any, key string) bool {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return false
@@ -541,7 +544,8 @@ func _jsonObjectHasKey(jsonStr string, key string) bool {
 	return ok
 }
 
-func _jsonObjectRemoveKey(jsonStr string, key string) string {
+func _jsonObjectRemoveKey(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	delete(m, key)
@@ -652,43 +656,13 @@ func dispatchClass(selector string, args []string) (string, error) {
 }
 
 func (c *BlockInvoker) EvalBlock(aBlock string) (string, error) {
-	aBlockInt, err := strconv.Atoi(aBlock)
-	if err != nil {
-		return "", err
-	}
-	_ = aBlockInt
 	return invokeBlock(aBlock), nil
 }
 
 func (c *BlockInvoker) EvalBlockWith(aBlock string, x string) (string, error) {
-	aBlockInt, err := strconv.Atoi(aBlock)
-	if err != nil {
-		return "", err
-	}
-	_ = aBlockInt
-	xInt, err := strconv.Atoi(x)
-	if err != nil {
-		return "", err
-	}
-	_ = xInt
 	return invokeBlock(aBlock, x), nil
 }
 
 func (c *BlockInvoker) EvalBlockWithAnd(aBlock string, x string, y string) (string, error) {
-	aBlockInt, err := strconv.Atoi(aBlock)
-	if err != nil {
-		return "", err
-	}
-	_ = aBlockInt
-	xInt, err := strconv.Atoi(x)
-	if err != nil {
-		return "", err
-	}
-	_ = xInt
-	yInt, err := strconv.Atoi(y)
-	if err != nil {
-		return "", err
-	}
-	_ = yInt
 	return invokeBlock(aBlock, x, y), nil
 }

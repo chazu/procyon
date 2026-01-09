@@ -512,7 +512,8 @@ func _jsonObjectIsEmpty(jsonStr string) bool {
 	return len(m) == 0
 }
 
-func _jsonObjectAt(jsonStr string, key string) string {
+func _jsonObjectAt(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return ""
@@ -523,7 +524,8 @@ func _jsonObjectAt(jsonStr string, key string) string {
 	return ""
 }
 
-func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
+func _jsonObjectAtPut(jsonVal any, key string, val any) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	if m == nil {
@@ -534,7 +536,8 @@ func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
 	return string(result)
 }
 
-func _jsonObjectHasKey(jsonStr string, key string) bool {
+func _jsonObjectHasKey(jsonVal any, key string) bool {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return false
@@ -543,7 +546,8 @@ func _jsonObjectHasKey(jsonStr string, key string) bool {
 	return ok
 }
 
-func _jsonObjectRemoveKey(jsonStr string, key string) string {
+func _jsonObjectRemoveKey(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	delete(m, key)
@@ -659,11 +663,6 @@ func (c *MessageSendTest) GetValue() string {
 }
 
 func (c *MessageSendTest) SetValue(x string) (string, error) {
-	xInt, err := strconv.Atoi(x)
-	if err != nil {
-		return "", err
-	}
-	_ = xInt
 	c.Value = x
 	return "", nil
 }

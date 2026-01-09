@@ -32,11 +32,11 @@ func init() {
 var ErrUnknownSelector = errors.New("unknown selector")
 
 type WhileTest struct {
-	Class     string   `json:"class"`
-	CreatedAt string   `json:"created_at"`
-	Vars      []string `json:"_vars"`
-	Items     string   `json:"items"`
-	Count     string   `json:"count"`
+	Class     string          `json:"class"`
+	CreatedAt string          `json:"created_at"`
+	Vars      []string        `json:"_vars"`
+	Items     json.RawMessage `json:"items"`
+	Count     string          `json:"count"`
 }
 
 func main() {
@@ -512,7 +512,8 @@ func _jsonObjectIsEmpty(jsonStr string) bool {
 	return len(m) == 0
 }
 
-func _jsonObjectAt(jsonStr string, key string) string {
+func _jsonObjectAt(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return ""
@@ -523,7 +524,8 @@ func _jsonObjectAt(jsonStr string, key string) string {
 	return ""
 }
 
-func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
+func _jsonObjectAtPut(jsonVal any, key string, val any) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	if m == nil {
@@ -534,7 +536,8 @@ func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
 	return string(result)
 }
 
-func _jsonObjectHasKey(jsonStr string, key string) bool {
+func _jsonObjectHasKey(jsonVal any, key string) bool {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return false
@@ -543,7 +546,8 @@ func _jsonObjectHasKey(jsonStr string, key string) bool {
 	return ok
 }
 
-func _jsonObjectRemoveKey(jsonStr string, key string) string {
+func _jsonObjectRemoveKey(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	delete(m, key)
@@ -651,28 +655,23 @@ func (c *WhileTest) SumItems() string {
 	var i interface{}
 	var len_ interface{}
 	var sum interface{}
-	len_ = strconv.Itoa(_jsonArrayLen(c.Items))
+	len_ = strconv.Itoa(_jsonArrayLen(string(c.Items)))
 	i = 0
 	sum = 0
 	for toInt(i) < toInt(len_) {
-		sum = toInt(sum) + toInt(_jsonArrayAt(c.Items, toInt(i)))
+		sum = toInt(sum) + toInt(_jsonArrayAt(string(c.Items), toInt(i)))
 		i = toInt(i) + toInt(1)
 	}
 	return _toStr(sum)
 }
 
 func (c *WhileTest) EachDo(aBlock string) (string, error) {
-	aBlockInt, err := strconv.Atoi(aBlock)
-	if err != nil {
-		return "", err
-	}
-	_ = aBlockInt
 	var i interface{}
 	var len_ interface{}
-	len_ = strconv.Itoa(_jsonArrayLen(c.Items))
+	len_ = strconv.Itoa(_jsonArrayLen(string(c.Items)))
 	i = 0
 	for toInt(i) < toInt(len_) {
-		invokeBlock(aBlock, _jsonArrayAt(c.Items, toInt(i)))
+		invokeBlock(aBlock, _jsonArrayAt(string(c.Items), toInt(i)))
 		i = toInt(i) + toInt(1)
 	}
 	return "", nil

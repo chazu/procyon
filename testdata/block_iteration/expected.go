@@ -32,11 +32,11 @@ func init() {
 var ErrUnknownSelector = errors.New("unknown selector")
 
 type IterTest struct {
-	Class     string   `json:"class"`
-	CreatedAt string   `json:"created_at"`
-	Vars      []string `json:"_vars"`
-	Items     string   `json:"items"`
-	Total     string   `json:"total"`
+	Class     string          `json:"class"`
+	CreatedAt string          `json:"created_at"`
+	Vars      []string        `json:"_vars"`
+	Items     json.RawMessage `json:"items"`
+	Total     string          `json:"total"`
 }
 
 func main() {
@@ -512,7 +512,8 @@ func _jsonObjectIsEmpty(jsonStr string) bool {
 	return len(m) == 0
 }
 
-func _jsonObjectAt(jsonStr string, key string) string {
+func _jsonObjectAt(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return ""
@@ -523,7 +524,8 @@ func _jsonObjectAt(jsonStr string, key string) string {
 	return ""
 }
 
-func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
+func _jsonObjectAtPut(jsonVal any, key string, val any) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	if m == nil {
@@ -534,7 +536,8 @@ func _jsonObjectAtPut(jsonStr string, key string, val interface{}) string {
 	return string(result)
 }
 
-func _jsonObjectHasKey(jsonStr string, key string) bool {
+func _jsonObjectHasKey(jsonVal any, key string) bool {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
 		return false
@@ -543,7 +546,8 @@ func _jsonObjectHasKey(jsonStr string, key string) bool {
 	return ok
 }
 
-func _jsonObjectRemoveKey(jsonStr string, key string) string {
+func _jsonObjectRemoveKey(jsonVal any, key string) string {
+	jsonStr := fmt.Sprintf("%v", jsonVal)
 	var m map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &m)
 	delete(m, key)
@@ -652,7 +656,7 @@ func (c *IterTest) SumAll() string {
 	var sum interface{}
 	sum = 0
 	var _items []interface{}
-	json.Unmarshal([]byte(c.Items), &_items)
+	json.Unmarshal([]byte(string(c.Items)), &_items)
 	for _, _each := range _items {
 		each := toInt(_each)
 		sum = toInt(sum) + toInt(each)
@@ -662,7 +666,7 @@ func (c *IterTest) SumAll() string {
 
 func (c *IterTest) DoubleAll() {
 	var _items []interface{}
-	json.Unmarshal([]byte(c.Items), &_items)
+	json.Unmarshal([]byte(string(c.Items)), &_items)
 	_results := make([]interface{}, 0)
 	for _, _x := range _items {
 		x := toInt(_x)
@@ -672,7 +676,7 @@ func (c *IterTest) DoubleAll() {
 
 func (c *IterTest) Positives() {
 	var _items []interface{}
-	json.Unmarshal([]byte(c.Items), &_items)
+	json.Unmarshal([]byte(string(c.Items)), &_items)
 	_results := make([]interface{}, 0)
 	for _, _x := range _items {
 		x := toInt(_x)
