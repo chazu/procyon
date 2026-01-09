@@ -94,16 +94,16 @@ const (
 
 // Token represents a lexer token with position information.
 type Token struct {
-	Type  TokenType
-	Value string
-	Line  int
-	Col   int
+	Type  TokenType `json:"type"`
+	Value string    `json:"value"`
+	Line  int       `json:"line"`
+	Col   int       `json:"col"`
 }
 
 // Location represents a source location for AST nodes.
 type Location struct {
-	Line int
-	Col  int
+	Line int `json:"line"`
+	Col  int `json:"col"`
 }
 
 // =============================================================================
@@ -112,89 +112,89 @@ type Location struct {
 
 // ClassAST represents a complete parsed class or trait.
 type ClassAST struct {
-	Type               string             // "class"
-	Name               string             // Class name
-	Package            string             // Package name (empty if none)
-	Imports            []string           // Imported packages
-	Parent             string             // Parent class name (empty for traits)
-	ParentPackage      string             // Parent's package (if qualified)
-	IsTrait            bool               // True if this is a trait definition
-	InstanceVars       []VarSpec          // Instance variables
-	ClassInstanceVars  []VarSpec          // Class instance variables
-	Traits             []string           // Included traits
-	Requires           []string           // File dependencies
-	MethodRequirements []string           // Protocol method requirements
-	Methods            []MethodAST        // Method definitions
-	Aliases            []AliasAST         // Method aliases
-	Advice             []AdviceAST        // Before/after advice
-	Warnings           []ParseWarning     // Non-fatal parse warnings
-	Location           Location           // Source location
+	Type               string         `json:"type"`               // "class"
+	Name               string         `json:"name"`               // Class name
+	Package            string         `json:"package"`            // Package name (empty if none)
+	Imports            []string       `json:"imports"`            // Imported packages
+	Parent             string         `json:"parent"`             // Parent class name (empty for traits)
+	ParentPackage      string         `json:"parentPackage"`      // Parent's package (if qualified)
+	IsTrait            bool           `json:"isTrait"`            // True if this is a trait definition
+	InstanceVars       []VarSpec      `json:"instanceVars"`       // Instance variables
+	ClassInstanceVars  []VarSpec      `json:"classInstanceVars"`  // Class instance variables
+	Traits             []string       `json:"traits"`             // Included traits
+	Requires           []string       `json:"requires"`           // File dependencies
+	MethodRequirements []string       `json:"methodRequirements"` // Protocol method requirements
+	Methods            []MethodAST    `json:"methods"`            // Method definitions
+	Aliases            []AliasAST     `json:"aliases"`            // Method aliases
+	Advice             []AdviceAST    `json:"advice"`             // Before/after advice
+	Warnings           []ParseWarning `json:"warnings"`           // Non-fatal parse warnings
+	Location           Location       `json:"location"`           // Source location
 }
 
 // VarSpec represents an instance variable declaration with optional default.
 type VarSpec struct {
-	Name     string       // Variable name
-	Default  *DefaultValue // Default value (nil if none)
-	Location Location     // Source location
+	Name     string        `json:"name"`     // Variable name
+	Default  *DefaultValue `json:"default"`  // Default value (nil if none)
+	Location Location      `json:"location"` // Source location
 }
 
 // DefaultValue represents a default value for a variable.
 type DefaultValue struct {
-	Type  string // "number", "string", or "triplestring"
-	Value string // The actual value
+	Type  string `json:"type"`  // "number", "string", or "triplestring"
+	Value string `json:"value"` // The actual value
 }
 
 // MethodAST represents a method definition.
 type MethodAST struct {
-	Type     string   // "method"
-	Kind     string   // "instance" or "class"
-	Raw      bool     // True for rawMethod/rawClassMethod
-	Selector string   // Method selector (e.g., "getValue", "at_put_")
-	Keywords []string // Keywords for keyword methods
-	Args     []string // Argument names
-	Body     BlockAST // Method body
-	Pragmas  []string // Method pragmas (e.g., "direct")
-	Category string   // Method category (empty if none)
-	Location Location // Source location
+	Type     string   `json:"type"`     // "method"
+	Kind     string   `json:"kind"`     // "instance" or "class"
+	Raw      bool     `json:"raw"`      // True for rawMethod/rawClassMethod
+	Selector string   `json:"selector"` // Method selector (e.g., "getValue", "at_put_")
+	Keywords []string `json:"keywords"` // Keywords for keyword methods
+	Args     []string `json:"args"`     // Argument names
+	Body     BlockAST `json:"body"`     // Method body
+	Pragmas  []string `json:"pragmas"`  // Method pragmas (e.g., "direct")
+	Category string   `json:"category"` // Method category (empty if none)
+	Location Location `json:"location"` // Source location
 }
 
 // BlockAST represents a block of code (method body or advice block).
 type BlockAST struct {
-	Type   string  // "block"
-	Tokens []Token // Tokens within the block
+	Type   string  `json:"type"`   // "block"
+	Tokens []Token `json:"tokens"` // Tokens within the block
 }
 
 // AliasAST represents a method alias declaration.
 type AliasAST struct {
-	Type           string   // "alias"
-	AliasName      string   // New method name
-	OriginalMethod string   // Existing method name
-	Location       Location // Source location
+	Type           string   `json:"type"`           // "alias"
+	AliasName      string   `json:"aliasName"`      // New method name
+	OriginalMethod string   `json:"originalMethod"` // Existing method name
+	Location       Location `json:"location"`       // Source location
 }
 
 // AdviceAST represents before/after method advice.
 type AdviceAST struct {
-	Type       string   // "advice"
-	AdviceType string   // "before" or "after"
-	Selector   string   // Method selector to advise
-	Block      BlockAST // Advice body
-	Location   Location // Source location
+	Type       string   `json:"type"`       // "advice"
+	AdviceType string   `json:"adviceType"` // "before" or "after"
+	Selector   string   `json:"selector"`   // Method selector to advise
+	Block      BlockAST `json:"block"`      // Advice body
+	Location   Location `json:"location"`   // Source location
 }
 
 // ParseWarning represents a non-fatal parse warning.
 type ParseWarning struct {
-	Type    string // Warning type (e.g., "possible_typo")
-	Message string // Warning message
-	Line    int    // Source line
-	Col     int    // Source column
+	Type    string `json:"type"`    // Warning type (e.g., "possible_typo")
+	Message string `json:"message"` // Warning message
+	Line    int    `json:"line"`    // Source line
+	Col     int    `json:"col"`     // Source column
 }
 
 // ParseError represents a parse error with context.
 type ParseError struct {
-	Type    string // Error type
-	Message string // Error message
-	Token   *Token // Token that caused the error
-	Context string // Parsing context
+	Type    string `json:"type"`    // Error type
+	Message string `json:"message"` // Error message
+	Token   *Token `json:"token"`   // Token that caused the error
+	Context string `json:"context"` // Parsing context
 }
 
 func (e *ParseError) Error() string {
