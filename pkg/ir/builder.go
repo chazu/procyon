@@ -439,6 +439,9 @@ func (b *Builder) buildExpr(expr parser.Expr, scope *Scope) (Expression, Backend
 	case *parser.JSONPrimitiveExpr:
 		return b.buildJSONPrimitive(e, scope)
 
+	case *parser.ClassPrimitiveExpr:
+		return b.buildClassPrimitive(e, scope)
+
 	case *parser.IterationExprAsValue:
 		// For return statements with iteration
 		return b.buildIterationAsValue(e.Iteration, scope)
@@ -653,6 +656,51 @@ func (b *Builder) buildJSONPrimitive(j *parser.JSONPrimitiveExpr, scope *Scope) 
 	return &JSONPrimitiveExpr{
 		Receiver:  receiver,
 		Operation: j.Operation,
+		Args:      args,
+		Type_:     resultType,
+	}, backend, reason
+}
+
+// buildClassPrimitive converts a parser ClassPrimitiveExpr to IR.
+// These are class method calls like @ String isEmpty: str, @ File exists: path
+func (b *Builder) buildClassPrimitive(c *parser.ClassPrimitiveExpr, scope *Scope) (Expression, Backend, string) {
+	var args []Expression
+	var backend Backend = BackendAny
+	var reason string
+
+	for _, arg := range c.Args {
+		argExpr, argBackend, argReason := b.buildExpr(arg, scope)
+		args = append(args, argExpr)
+		if argBackend == BackendBash {
+			backend = BackendBash
+			if reason == "" {
+				reason = argReason
+			}
+		}
+	}
+
+	// Determine result type based on operation
+	resultType := TypeString
+	switch c.Operation {
+	// String predicates return bool
+	case "stringIsEmpty", "stringNotEmpty", "stringContains",
+		"stringStartsWith", "stringEndsWith", "stringEquals":
+		resultType = TypeBool
+	// String length returns int
+	case "stringLength":
+		resultType = TypeInt
+	// File predicates return bool
+	case "fileExists", "fileIsFile", "fileIsDirectory", "fileIsSymlink",
+		"fileIsFifo", "fileIsSocket", "fileIsBlockDevice", "fileIsCharDevice",
+		"fileIsReadable", "fileIsWritable", "fileIsExecutable",
+		"fileIsEmpty", "fileNotEmpty",
+		"fileIsNewer", "fileIsOlder", "fileIsSame":
+		resultType = TypeBool
+	}
+
+	return &ClassPrimitiveExpr{
+		ClassName: c.ClassName,
+		Operation: c.Operation,
 		Args:      args,
 		Type_:     resultType,
 	}, backend, reason

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	uuid "github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
+	unix "golang.org/x/sys/unix"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -551,6 +552,141 @@ func _jsonObjectRemoveKey(jsonVal any, key string) string {
 	delete(m, key)
 	result, _ := json.Marshal(m)
 	return string(result)
+}
+
+// String primitive helpers
+func _stringSubstring(s string, start int, length int) string {
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(s) {
+		return ""
+	}
+	end := start + length
+	if end > len(s) {
+		end = len(s)
+	}
+	return s[start:end]
+}
+
+// File primitive helpers
+func _fileExists(path string) string {
+	_, err := os.Stat(path)
+	return _boolToString(err == nil)
+}
+
+func _fileIsFile(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.Mode().IsRegular())
+}
+
+func _fileIsDirectory(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.IsDir())
+}
+
+func _fileIsSymlink(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.Mode()&os.ModeSymlink != 0)
+}
+
+func _fileIsFifo(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.Mode()&os.ModeNamedPipe != 0)
+}
+
+func _fileIsSocket(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.Mode()&os.ModeSocket != 0)
+}
+
+func _fileIsBlockDevice(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.Mode()&os.ModeDevice != 0 && info.Mode()&os.ModeCharDevice == 0)
+}
+
+func _fileIsCharDevice(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.Mode()&os.ModeCharDevice != 0)
+}
+
+func _fileIsReadable(path string) string {
+	err := unix.Access(path, unix.R_OK)
+	return _boolToString(err == nil)
+}
+
+func _fileIsWritable(path string) string {
+	err := unix.Access(path, unix.W_OK)
+	return _boolToString(err == nil)
+}
+
+func _fileIsExecutable(path string) string {
+	err := unix.Access(path, unix.X_OK)
+	return _boolToString(err == nil)
+}
+
+func _fileIsEmpty(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.Size() == 0)
+}
+
+func _fileNotEmpty(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "false"
+	}
+	return _boolToString(info.Size() > 0)
+}
+
+func _fileIsNewer(path1 string, path2 string) string {
+	info1, err1 := os.Stat(path1)
+	info2, err2 := os.Stat(path2)
+	if err1 != nil || err2 != nil {
+		return "false"
+	}
+	return _boolToString(info1.ModTime().After(info2.ModTime()))
+}
+
+func _fileIsOlder(path1 string, path2 string) string {
+	info1, err1 := os.Stat(path1)
+	info2, err2 := os.Stat(path2)
+	if err1 != nil || err2 != nil {
+		return "false"
+	}
+	return _boolToString(info1.ModTime().Before(info2.ModTime()))
+}
+
+func _fileIsSame(path1 string, path2 string) string {
+	info1, err1 := os.Stat(path1)
+	info2, err2 := os.Stat(path2)
+	if err1 != nil || err2 != nil {
+		return "false"
+	}
+	return _boolToString(os.SameFile(info1, info2))
 }
 
 // toInt converts interface{} to int for arithmetic in iteration blocks

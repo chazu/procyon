@@ -186,6 +186,18 @@ type JSONPrimitiveExpr struct {
 
 func (JSONPrimitiveExpr) exprNode() {}
 
+// ClassPrimitiveExpr represents primitive class method calls like:
+// @ String isEmpty: str
+// @ File exists: path
+// These are optimized to native code instead of message sends
+type ClassPrimitiveExpr struct {
+	ClassName string // "String" or "File"
+	Operation string // "stringIsEmpty", "fileExists", etc.
+	Args      []Expr // Arguments for the operation
+}
+
+func (ClassPrimitiveExpr) exprNode() {}
+
 // MessageSend represents: @ receiver selector or @ receiver key1: arg1 key2: arg2
 type MessageSend struct {
 	Receiver Expr     // self, identifier, or other expression
@@ -796,6 +808,98 @@ func isJSONPrimitiveKeyword2(keyword string) (string, bool) {
 	return "", false
 }
 
+// isStringPrimitive checks if a selector on String class is a known primitive.
+// Returns (operation name, true) if it's a primitive.
+func isStringPrimitive(selector string) (string, bool) {
+	switch selector {
+	case "isEmpty_":
+		return "stringIsEmpty", true
+	case "notEmpty_":
+		return "stringNotEmpty", true
+	case "contains_substring_":
+		return "stringContains", true
+	case "startsWith_prefix_":
+		return "stringStartsWith", true
+	case "endsWith_suffix_":
+		return "stringEndsWith", true
+	case "equals_to_":
+		return "stringEquals", true
+	case "trimPrefix_from_":
+		return "stringTrimPrefix", true
+	case "trimSuffix_from_":
+		return "stringTrimSuffix", true
+	case "replace_with_in_":
+		return "stringReplace", true
+	case "replaceAll_with_in_":
+		return "stringReplaceAll", true
+	case "substring_from_length_":
+		return "stringSubstring", true
+	case "length_":
+		return "stringLength", true
+	case "uppercase_":
+		return "stringUppercase", true
+	case "lowercase_":
+		return "stringLowercase", true
+	case "trim_":
+		return "stringTrim", true
+	case "concat_with_":
+		return "stringConcat", true
+	}
+	return "", false
+}
+
+// isFilePrimitive checks if a selector on File class is a known primitive.
+// Returns (operation name, true) if it's a primitive.
+func isFilePrimitive(selector string) (string, bool) {
+	switch selector {
+	case "exists_":
+		return "fileExists", true
+	case "isFile_":
+		return "fileIsFile", true
+	case "isDirectory_":
+		return "fileIsDirectory", true
+	case "isSymlink_":
+		return "fileIsSymlink", true
+	case "isFifo_":
+		return "fileIsFifo", true
+	case "isSocket_":
+		return "fileIsSocket", true
+	case "isBlockDevice_":
+		return "fileIsBlockDevice", true
+	case "isCharDevice_":
+		return "fileIsCharDevice", true
+	case "isReadable_":
+		return "fileIsReadable", true
+	case "isWritable_":
+		return "fileIsWritable", true
+	case "isExecutable_":
+		return "fileIsExecutable", true
+	case "isEmpty_":
+		return "fileIsEmpty", true
+	case "notEmpty_":
+		return "fileNotEmpty", true
+	case "isNewer_than_":
+		return "fileIsNewer", true
+	case "isOlder_than_":
+		return "fileIsOlder", true
+	case "isSame_as_":
+		return "fileIsSame", true
+	}
+	return "", false
+}
+
+// isClassPrimitive checks if a message send to a class is a known primitive.
+// Returns (operation name, true) if it's a primitive.
+func isClassPrimitive(className, selector string) (string, bool) {
+	switch className {
+	case "String":
+		return isStringPrimitive(selector)
+	case "File":
+		return isFilePrimitive(selector)
+	}
+	return "", false
+}
+
 // parseJSONPrimitive checks if the next token is a JSON primitive and parses it.
 // Also handles general unary messages like: result notEmpty
 // Supports chained primitives like: items arrayPush: x arrayPush: y
@@ -1003,6 +1107,7 @@ func (p *Parser) parseMessageSend() (Expr, error) {
 
 // parseKeywordMessage parses: key1: arg1 key2: arg2 ...
 // Returns a MessageSend with combined selector (e.g., "at_put_") and args
+// Or returns a ClassPrimitiveExpr if receiver is String/File with a known primitive selector
 func (p *Parser) parseKeywordMessage(receiver Expr, isSelf bool) (Expr, error) {
 	var selectorParts []string
 	var args []Expr
@@ -1030,6 +1135,18 @@ func (p *Parser) parseKeywordMessage(receiver Expr, isSelf bool) (Expr, error) {
 	selector := ""
 	for _, part := range selectorParts {
 		selector += part
+	}
+
+	// Check if this is a class primitive (e.g., @ String isEmpty: str)
+	// The receiver must be an Identifier with a class name (String or File)
+	if ident, ok := receiver.(*Identifier); ok && !isSelf {
+		if op, isPrimitive := isClassPrimitive(ident.Name, selector); isPrimitive {
+			return &ClassPrimitiveExpr{
+				ClassName: ident.Name,
+				Operation: op,
+				Args:      args,
+			}, nil
+		}
 	}
 
 	return &MessageSend{

@@ -485,6 +485,9 @@ func (g *generator) generateHelpers(f *jen.File) {
 	// JSON primitive helper functions
 	g.generateJSONHelpers(f)
 
+	// String/File primitive helper functions
+	g.generateStringFileHelpers(f)
+
 	// gRPC helper functions for GrpcClient class
 	if g.class.Name == "GrpcClient" {
 		g.generateGrpcHelpers(f)
@@ -1739,6 +1742,9 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 	case *parser.JSONPrimitiveExpr:
 		return g.generateJSONPrimitive(e, m)
 
+	case *parser.ClassPrimitiveExpr:
+		return g.generateClassPrimitive(e, m)
+
 	case *parser.BlockExpr:
 		// Block used as expression (e.g., [i < len] whileTrue: [...])
 		// If it has a single expression statement, extract and evaluate it
@@ -1952,6 +1958,190 @@ func isBlockInvocationSelector(selector string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// generateClassPrimitive generates Go code for class primitive operations
+// like @ String isEmpty: str, @ File exists: path
+func (g *generator) generateClassPrimitive(e *parser.ClassPrimitiveExpr, m *compiledMethod) *jen.Statement {
+	switch e.ClassName {
+	case "String":
+		return g.generateStringPrimitive(e, m)
+	case "File":
+		return g.generateFilePrimitive(e, m)
+	default:
+		return jen.Comment("unknown class primitive: " + e.ClassName)
+	}
+}
+
+// generateStringPrimitive generates Go code for String class primitives
+func (g *generator) generateStringPrimitive(e *parser.ClassPrimitiveExpr, m *compiledMethod) *jen.Statement {
+	switch e.Operation {
+	case "stringIsEmpty":
+		arg := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_boolToString").Call(jen.Len(arg).Op("==").Lit(0))
+
+	case "stringNotEmpty":
+		arg := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_boolToString").Call(jen.Len(arg).Op(">").Lit(0))
+
+	case "stringContains":
+		str := g.generateStringArg(e.Args[0], m)
+		sub := g.generateStringArg(e.Args[1], m)
+		return jen.Id("_boolToString").Call(
+			jen.Qual("strings", "Contains").Call(str, sub),
+		)
+
+	case "stringStartsWith":
+		str := g.generateStringArg(e.Args[0], m)
+		prefix := g.generateStringArg(e.Args[1], m)
+		return jen.Id("_boolToString").Call(
+			jen.Qual("strings", "HasPrefix").Call(str, prefix),
+		)
+
+	case "stringEndsWith":
+		str := g.generateStringArg(e.Args[0], m)
+		suffix := g.generateStringArg(e.Args[1], m)
+		return jen.Id("_boolToString").Call(
+			jen.Qual("strings", "HasSuffix").Call(str, suffix),
+		)
+
+	case "stringEquals":
+		a := g.generateStringArg(e.Args[0], m)
+		b := g.generateStringArg(e.Args[1], m)
+		return jen.Id("_boolToString").Call(a.Op("==").Add(b))
+
+	case "stringTrimPrefix":
+		// trimPrefix: pattern from: str -> TrimPrefix(str, pattern)
+		pattern := g.generateStringArg(e.Args[0], m)
+		str := g.generateStringArg(e.Args[1], m)
+		return jen.Qual("strings", "TrimPrefix").Call(str, pattern)
+
+	case "stringTrimSuffix":
+		// trimSuffix: pattern from: str -> TrimSuffix(str, pattern)
+		pattern := g.generateStringArg(e.Args[0], m)
+		str := g.generateStringArg(e.Args[1], m)
+		return jen.Qual("strings", "TrimSuffix").Call(str, pattern)
+
+	case "stringReplace":
+		// replace: old with: new in: str -> Replace(str, old, new, 1)
+		old := g.generateStringArg(e.Args[0], m)
+		newStr := g.generateStringArg(e.Args[1], m)
+		str := g.generateStringArg(e.Args[2], m)
+		return jen.Qual("strings", "Replace").Call(str, old, newStr, jen.Lit(1))
+
+	case "stringReplaceAll":
+		// replaceAll: old with: new in: str -> ReplaceAll(str, old, new)
+		old := g.generateStringArg(e.Args[0], m)
+		newStr := g.generateStringArg(e.Args[1], m)
+		str := g.generateStringArg(e.Args[2], m)
+		return jen.Qual("strings", "ReplaceAll").Call(str, old, newStr)
+
+	case "stringSubstring":
+		// substring: str from: start length: len
+		str := g.generateStringArg(e.Args[0], m)
+		start := g.generateExpr(e.Args[1], m)
+		length := g.generateExpr(e.Args[2], m)
+		return jen.Id("_stringSubstring").Call(str, jen.Id("toInt").Call(start), jen.Id("toInt").Call(length))
+
+	case "stringLength":
+		arg := g.generateStringArg(e.Args[0], m)
+		return jen.Qual("strconv", "Itoa").Call(jen.Len(arg))
+
+	case "stringUppercase":
+		arg := g.generateStringArg(e.Args[0], m)
+		return jen.Qual("strings", "ToUpper").Call(arg)
+
+	case "stringLowercase":
+		arg := g.generateStringArg(e.Args[0], m)
+		return jen.Qual("strings", "ToLower").Call(arg)
+
+	case "stringTrim":
+		arg := g.generateStringArg(e.Args[0], m)
+		return jen.Qual("strings", "TrimSpace").Call(arg)
+
+	case "stringConcat":
+		a := g.generateStringArg(e.Args[0], m)
+		b := g.generateStringArg(e.Args[1], m)
+		return a.Op("+").Add(b)
+
+	default:
+		return jen.Comment("unknown string primitive: " + e.Operation)
+	}
+}
+
+// generateFilePrimitive generates Go code for File class primitives
+func (g *generator) generateFilePrimitive(e *parser.ClassPrimitiveExpr, m *compiledMethod) *jen.Statement {
+	switch e.Operation {
+	case "fileExists":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileExists").Call(path)
+
+	case "fileIsFile":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsFile").Call(path)
+
+	case "fileIsDirectory":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsDirectory").Call(path)
+
+	case "fileIsSymlink":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsSymlink").Call(path)
+
+	case "fileIsFifo":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsFifo").Call(path)
+
+	case "fileIsSocket":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsSocket").Call(path)
+
+	case "fileIsBlockDevice":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsBlockDevice").Call(path)
+
+	case "fileIsCharDevice":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsCharDevice").Call(path)
+
+	case "fileIsReadable":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsReadable").Call(path)
+
+	case "fileIsWritable":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsWritable").Call(path)
+
+	case "fileIsExecutable":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsExecutable").Call(path)
+
+	case "fileIsEmpty":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileIsEmpty").Call(path)
+
+	case "fileNotEmpty":
+		path := g.generateStringArg(e.Args[0], m)
+		return jen.Id("_fileNotEmpty").Call(path)
+
+	case "fileIsNewer":
+		path1 := g.generateStringArg(e.Args[0], m)
+		path2 := g.generateStringArg(e.Args[1], m)
+		return jen.Id("_fileIsNewer").Call(path1, path2)
+
+	case "fileIsOlder":
+		path1 := g.generateStringArg(e.Args[0], m)
+		path2 := g.generateStringArg(e.Args[1], m)
+		return jen.Id("_fileIsOlder").Call(path1, path2)
+
+	case "fileIsSame":
+		path1 := g.generateStringArg(e.Args[0], m)
+		path2 := g.generateStringArg(e.Args[1], m)
+		return jen.Id("_fileIsSame").Call(path1, path2)
+
+	default:
+		return jen.Comment("unknown file primitive: " + e.Operation)
 	}
 }
 
@@ -3118,6 +3308,212 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 			),
 		),
 		jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%d"), jen.Id("count")), jen.Nil()),
+	)
+	f.Line()
+}
+
+// generateStringFileHelpers generates helper functions for String and File class primitives
+func (g *generator) generateStringFileHelpers(f *jen.File) {
+	// String helpers
+	f.Comment("// String primitive helpers")
+
+	// _stringSubstring - safe substring extraction with bounds checking
+	f.Func().Id("_stringSubstring").Params(
+		jen.Id("s").String(),
+		jen.Id("start").Int(),
+		jen.Id("length").Int(),
+	).String().Block(
+		jen.If(jen.Id("start").Op("<").Lit(0)).Block(
+			jen.Id("start").Op("=").Lit(0),
+		),
+		jen.If(jen.Id("start").Op(">=").Len(jen.Id("s"))).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Id("end").Op(":=").Id("start").Op("+").Id("length"),
+		jen.If(jen.Id("end").Op(">").Len(jen.Id("s"))).Block(
+			jen.Id("end").Op("=").Len(jen.Id("s")),
+		),
+		jen.Return(jen.Id("s").Index(jen.Id("start").Op(":").Id("end"))),
+	)
+	f.Line()
+
+	// File helpers
+	f.Comment("// File primitive helpers")
+
+	// _fileExists - check if file/directory exists
+	f.Func().Id("_fileExists").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("_"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.Return(jen.Id("_boolToString").Call(jen.Err().Op("==").Nil())),
+	)
+	f.Line()
+
+	// _fileIsFile - check if path is a regular file
+	f.Func().Id("_fileIsFile").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(jen.Id("info").Dot("Mode").Call().Dot("IsRegular").Call())),
+	)
+	f.Line()
+
+	// _fileIsDirectory - check if path is a directory
+	f.Func().Id("_fileIsDirectory").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(jen.Id("info").Dot("IsDir").Call())),
+	)
+	f.Line()
+
+	// _fileIsSymlink - check if path is a symlink
+	f.Func().Id("_fileIsSymlink").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Lstat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(
+			jen.Id("info").Dot("Mode").Call().Op("&").Qual("os", "ModeSymlink").Op("!=").Lit(0),
+		)),
+	)
+	f.Line()
+
+	// _fileIsFifo - check if path is a named pipe
+	f.Func().Id("_fileIsFifo").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(
+			jen.Id("info").Dot("Mode").Call().Op("&").Qual("os", "ModeNamedPipe").Op("!=").Lit(0),
+		)),
+	)
+	f.Line()
+
+	// _fileIsSocket - check if path is a socket
+	f.Func().Id("_fileIsSocket").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(
+			jen.Id("info").Dot("Mode").Call().Op("&").Qual("os", "ModeSocket").Op("!=").Lit(0),
+		)),
+	)
+	f.Line()
+
+	// _fileIsBlockDevice - check if path is a block device
+	f.Func().Id("_fileIsBlockDevice").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(
+			jen.Id("info").Dot("Mode").Call().Op("&").Qual("os", "ModeDevice").Op("!=").Lit(0).Op("&&").
+				Id("info").Dot("Mode").Call().Op("&").Qual("os", "ModeCharDevice").Op("==").Lit(0),
+		)),
+	)
+	f.Line()
+
+	// _fileIsCharDevice - check if path is a character device
+	f.Func().Id("_fileIsCharDevice").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(
+			jen.Id("info").Dot("Mode").Call().Op("&").Qual("os", "ModeCharDevice").Op("!=").Lit(0),
+		)),
+	)
+	f.Line()
+
+	// _fileIsReadable - check if path is readable
+	f.Func().Id("_fileIsReadable").Params(jen.Id("path").String()).String().Block(
+		jen.Err().Op(":=").Qual("golang.org/x/sys/unix", "Access").Call(jen.Id("path"), jen.Qual("golang.org/x/sys/unix", "R_OK")),
+		jen.Return(jen.Id("_boolToString").Call(jen.Err().Op("==").Nil())),
+	)
+	f.Line()
+
+	// _fileIsWritable - check if path is writable
+	f.Func().Id("_fileIsWritable").Params(jen.Id("path").String()).String().Block(
+		jen.Err().Op(":=").Qual("golang.org/x/sys/unix", "Access").Call(jen.Id("path"), jen.Qual("golang.org/x/sys/unix", "W_OK")),
+		jen.Return(jen.Id("_boolToString").Call(jen.Err().Op("==").Nil())),
+	)
+	f.Line()
+
+	// _fileIsExecutable - check if path is executable
+	f.Func().Id("_fileIsExecutable").Params(jen.Id("path").String()).String().Block(
+		jen.Err().Op(":=").Qual("golang.org/x/sys/unix", "Access").Call(jen.Id("path"), jen.Qual("golang.org/x/sys/unix", "X_OK")),
+		jen.Return(jen.Id("_boolToString").Call(jen.Err().Op("==").Nil())),
+	)
+	f.Line()
+
+	// _fileIsEmpty - check if file has zero size
+	f.Func().Id("_fileIsEmpty").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(jen.Id("info").Dot("Size").Call().Op("==").Lit(0))),
+	)
+	f.Line()
+
+	// _fileNotEmpty - check if file has non-zero size
+	f.Func().Id("_fileNotEmpty").Params(jen.Id("path").String()).String().Block(
+		jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("path")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(jen.Id("info").Dot("Size").Call().Op(">").Lit(0))),
+	)
+	f.Line()
+
+	// _fileIsNewer - check if path1 is newer than path2
+	f.Func().Id("_fileIsNewer").Params(
+		jen.Id("path1").String(),
+		jen.Id("path2").String(),
+	).String().Block(
+		jen.List(jen.Id("info1"), jen.Id("err1")).Op(":=").Qual("os", "Stat").Call(jen.Id("path1")),
+		jen.List(jen.Id("info2"), jen.Id("err2")).Op(":=").Qual("os", "Stat").Call(jen.Id("path2")),
+		jen.If(jen.Id("err1").Op("!=").Nil().Op("||").Id("err2").Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(
+			jen.Id("info1").Dot("ModTime").Call().Dot("After").Call(jen.Id("info2").Dot("ModTime").Call()),
+		)),
+	)
+	f.Line()
+
+	// _fileIsOlder - check if path1 is older than path2
+	f.Func().Id("_fileIsOlder").Params(
+		jen.Id("path1").String(),
+		jen.Id("path2").String(),
+	).String().Block(
+		jen.List(jen.Id("info1"), jen.Id("err1")).Op(":=").Qual("os", "Stat").Call(jen.Id("path1")),
+		jen.List(jen.Id("info2"), jen.Id("err2")).Op(":=").Qual("os", "Stat").Call(jen.Id("path2")),
+		jen.If(jen.Id("err1").Op("!=").Nil().Op("||").Id("err2").Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(
+			jen.Id("info1").Dot("ModTime").Call().Dot("Before").Call(jen.Id("info2").Dot("ModTime").Call()),
+		)),
+	)
+	f.Line()
+
+	// _fileIsSame - check if both paths refer to the same file (same inode)
+	f.Func().Id("_fileIsSame").Params(
+		jen.Id("path1").String(),
+		jen.Id("path2").String(),
+	).String().Block(
+		jen.List(jen.Id("info1"), jen.Id("err1")).Op(":=").Qual("os", "Stat").Call(jen.Id("path1")),
+		jen.List(jen.Id("info2"), jen.Id("err2")).Op(":=").Qual("os", "Stat").Call(jen.Id("path2")),
+		jen.If(jen.Id("err1").Op("!=").Nil().Op("||").Id("err2").Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("false")),
+		),
+		jen.Return(jen.Id("_boolToString").Call(
+			jen.Qual("os", "SameFile").Call(jen.Id("info1"), jen.Id("info2")),
+		)),
 	)
 	f.Line()
 }

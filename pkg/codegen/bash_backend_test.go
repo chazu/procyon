@@ -2237,6 +2237,158 @@ func TestBashBackend_JSONPrimitive_ObjectAtPut(t *testing.T) {
 }
 
 // =============================================================================
+// CLASS PRIMITIVE OPERATION TESTS (String/File)
+// =============================================================================
+
+func TestBashBackend_ClassPrimitive_StringIsEmpty(t *testing.T) {
+	prog := &ir.Program{
+		Name:   "Validator",
+		Parent: "Object",
+		Methods: []ir.Method{
+			{
+				Selector: "checkEmpty:",
+				Kind:     ir.InstanceMethod,
+				Args:     []ir.VarDecl{{Name: "str"}},
+				Body: []ir.Statement{
+					&ir.ReturnStmt{
+						Value: &ir.ClassPrimitiveExpr{
+							ClassName: "String",
+							Operation: "stringIsEmpty",
+							Args:      []ir.Expression{&ir.VarRefExpr{Name: "str", Kind: ir.VarParam}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	backend := codegen.NewBashBackend()
+	result, err := backend.Generate(prog)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	// Should generate a message send to String class
+	if !strings.Contains(result, "@ String isEmpty_") {
+		t.Errorf("Expected '@ String isEmpty_' in output, got:\n%s", result)
+	}
+}
+
+func TestBashBackend_ClassPrimitive_FileExists(t *testing.T) {
+	prog := &ir.Program{
+		Name:   "FileChecker",
+		Parent: "Object",
+		Methods: []ir.Method{
+			{
+				Selector: "fileExists:",
+				Kind:     ir.InstanceMethod,
+				Args:     []ir.VarDecl{{Name: "path"}},
+				Body: []ir.Statement{
+					&ir.ReturnStmt{
+						Value: &ir.ClassPrimitiveExpr{
+							ClassName: "File",
+							Operation: "fileExists",
+							Args:      []ir.Expression{&ir.VarRefExpr{Name: "path", Kind: ir.VarParam}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	backend := codegen.NewBashBackend()
+	result, err := backend.Generate(prog)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	// Should generate a message send to File class
+	if !strings.Contains(result, "@ File exists_") {
+		t.Errorf("Expected '@ File exists_' in output, got:\n%s", result)
+	}
+}
+
+func TestBashBackend_ClassPrimitive_StringContains(t *testing.T) {
+	prog := &ir.Program{
+		Name:   "Search",
+		Parent: "Object",
+		Methods: []ir.Method{
+			{
+				Selector: "hasSubstring:in:",
+				Kind:     ir.InstanceMethod,
+				Args: []ir.VarDecl{
+					{Name: "sub"},
+					{Name: "str"},
+				},
+				Body: []ir.Statement{
+					&ir.ReturnStmt{
+						Value: &ir.ClassPrimitiveExpr{
+							ClassName: "String",
+							Operation: "stringContains",
+							Args: []ir.Expression{
+								&ir.VarRefExpr{Name: "str", Kind: ir.VarParam},
+								&ir.VarRefExpr{Name: "sub", Kind: ir.VarParam},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	backend := codegen.NewBashBackend()
+	result, err := backend.Generate(prog)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	// Should generate a message send with two args
+	if !strings.Contains(result, "@ String contains_substring_") {
+		t.Errorf("Expected '@ String contains_substring_' in output, got:\n%s", result)
+	}
+}
+
+func TestBashBackend_ClassPrimitive_FileIsNewer(t *testing.T) {
+	prog := &ir.Program{
+		Name:   "FileComparer",
+		Parent: "Object",
+		Methods: []ir.Method{
+			{
+				Selector: "isNewer:than:",
+				Kind:     ir.InstanceMethod,
+				Args: []ir.VarDecl{
+					{Name: "path1"},
+					{Name: "path2"},
+				},
+				Body: []ir.Statement{
+					&ir.ReturnStmt{
+						Value: &ir.ClassPrimitiveExpr{
+							ClassName: "File",
+							Operation: "fileIsNewer",
+							Args: []ir.Expression{
+								&ir.VarRefExpr{Name: "path1", Kind: ir.VarParam},
+								&ir.VarRefExpr{Name: "path2", Kind: ir.VarParam},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	backend := codegen.NewBashBackend()
+	result, err := backend.Generate(prog)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	// Should generate a message send with two args
+	if !strings.Contains(result, "@ File isNewer_than_") {
+		t.Errorf("Expected '@ File isNewer_than_' in output, got:\n%s", result)
+	}
+}
+
+// =============================================================================
 // HELPER FUNCTIONS FOR TESTS
 // =============================================================================
 

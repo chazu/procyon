@@ -450,6 +450,8 @@ func (b *BashBackend) generateExpr(expr ir.Expression) (string, error) {
 		return e.FullName(), nil
 	case *ir.JSONPrimitiveExpr:
 		return b.generateJSONPrimitive(e)
+	case *ir.ClassPrimitiveExpr:
+		return b.generateClassPrimitive(e)
 	default:
 		return "", fmt.Errorf("unsupported expression type: %T", expr)
 	}
@@ -718,6 +720,102 @@ func (b *BashBackend) generateJSONPrimitive(e *ir.JSONPrimitiveExpr) (string, er
 	default:
 		return "", fmt.Errorf("unsupported JSON operation: %s", e.Operation)
 	}
+}
+
+// generateClassPrimitive generates Bash code for class primitive operations
+// by falling back to message sends to the Bash runtime
+func (b *BashBackend) generateClassPrimitive(e *ir.ClassPrimitiveExpr) (string, error) {
+	// Map operation names back to selectors
+	var selector string
+	switch e.Operation {
+	// String operations
+	case "stringIsEmpty":
+		selector = "isEmpty:"
+	case "stringNotEmpty":
+		selector = "notEmpty:"
+	case "stringContains":
+		selector = "contains:substring:"
+	case "stringStartsWith":
+		selector = "startsWith:prefix:"
+	case "stringEndsWith":
+		selector = "endsWith:suffix:"
+	case "stringEquals":
+		selector = "equals:to:"
+	case "stringTrimPrefix":
+		selector = "trimPrefix:from:"
+	case "stringTrimSuffix":
+		selector = "trimSuffix:from:"
+	case "stringReplace":
+		selector = "replace:with:in:"
+	case "stringReplaceAll":
+		selector = "replaceAll:with:in:"
+	case "stringSubstring":
+		selector = "substring:from:length:"
+	case "stringLength":
+		selector = "length:"
+	case "stringUppercase":
+		selector = "uppercase:"
+	case "stringLowercase":
+		selector = "lowercase:"
+	case "stringTrim":
+		selector = "trim:"
+	case "stringConcat":
+		selector = "concat:with:"
+
+	// File operations
+	case "fileExists":
+		selector = "exists:"
+	case "fileIsFile":
+		selector = "isFile:"
+	case "fileIsDirectory":
+		selector = "isDirectory:"
+	case "fileIsSymlink":
+		selector = "isSymlink:"
+	case "fileIsFifo":
+		selector = "isFifo:"
+	case "fileIsSocket":
+		selector = "isSocket:"
+	case "fileIsBlockDevice":
+		selector = "isBlockDevice:"
+	case "fileIsCharDevice":
+		selector = "isCharDevice:"
+	case "fileIsReadable":
+		selector = "isReadable:"
+	case "fileIsWritable":
+		selector = "isWritable:"
+	case "fileIsExecutable":
+		selector = "isExecutable:"
+	case "fileIsEmpty":
+		selector = "isEmpty:"
+	case "fileNotEmpty":
+		selector = "notEmpty:"
+	case "fileIsNewer":
+		selector = "isNewer:than:"
+	case "fileIsOlder":
+		selector = "isOlder:than:"
+	case "fileIsSame":
+		selector = "isSame:as:"
+
+	default:
+		return "", fmt.Errorf("unsupported class primitive operation: %s", e.Operation)
+	}
+
+	// Generate args
+	var args []string
+	for _, arg := range e.Args {
+		argStr, err := b.generateExpr(arg)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, fmt.Sprintf("\"%s\"", argStr))
+	}
+
+	// Generate message send: $(@ ClassName selector args...)
+	bashSelector := selectorToBashName(selector)
+	if len(args) > 0 {
+		return fmt.Sprintf("$(@ %s %s %s)", e.ClassName, bashSelector, strings.Join(args, " ")), nil
+	}
+	return fmt.Sprintf("$(@ %s %s)", e.ClassName, bashSelector), nil
 }
 
 // Helper methods

@@ -326,6 +326,19 @@ type JSONPrimitiveExpr struct {
 func (JSONPrimitiveExpr) irExpr()            {}
 func (e JSONPrimitiveExpr) ResultType() Type { return e.Type_ }
 
+// ClassPrimitiveExpr represents primitive class method calls like:
+// @ String isEmpty: str
+// @ File exists: path
+type ClassPrimitiveExpr struct {
+	ClassName string       // "String" or "File"
+	Operation string       // "stringIsEmpty", "fileExists", etc.
+	Args      []Expression // Arguments
+	Type_     Type
+}
+
+func (ClassPrimitiveExpr) irExpr()            {}
+func (e ClassPrimitiveExpr) ResultType() Type { return e.Type_ }
+
 // SelfExpr represents the self reference
 type SelfExpr struct{}
 
