@@ -1609,6 +1609,10 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 		}
 		return jen.Id(name)
 
+	case *parser.QualifiedName:
+		// Qualified name (Pkg::Class) - return the full name as a string literal
+		return jen.Lit(e.FullName())
+
 	case *parser.NumberLit:
 		return jen.Lit(mustAtoi(e.Value))
 
@@ -1694,8 +1698,11 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 		// Non-self send: shell out to bash runtime
 		// Generate: sendMessage(receiver, selector, args...)
 		var receiverExpr *jen.Statement
-		// Check if receiver is a class name (uppercase identifier that's not a local var)
-		if ident, ok := e.Receiver.(*parser.Identifier); ok {
+		// Check if receiver is a qualified name (Pkg::Class) - use full name as string literal
+		if qn, ok := e.Receiver.(*parser.QualifiedName); ok {
+			receiverExpr = jen.Lit(qn.FullName())
+		} else if ident, ok := e.Receiver.(*parser.Identifier); ok {
+			// Check if receiver is a class name (uppercase identifier that's not a local var)
 			name := ident.Name
 			isLocalVar := false
 			// Check instance vars, method args, and local vars

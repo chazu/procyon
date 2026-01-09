@@ -151,4 +151,7 @@ const (
 
 	// Blocks
 	TokenBlockParam = "BLOCK_PARAM" // :param in [:param | body]
+
+	// Namespaces
+	TokenNamespaceSep = "NAMESPACE_SEP" // :: for qualified names like Pkg::Class
 )

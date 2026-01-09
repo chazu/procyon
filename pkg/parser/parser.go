@@ -62,6 +62,19 @@ type Identifier struct {
 
 func (Identifier) exprNode() {}
 
+// QualifiedName represents a namespaced class reference: Package::Class
+type QualifiedName struct {
+	Package string // The package/namespace name (e.g., "Yutani")
+	Name    string // The class name (e.g., "Widget")
+}
+
+func (QualifiedName) exprNode() {}
+
+// FullName returns the fully qualified name as "Package::Name"
+func (q QualifiedName) FullName() string {
+	return q.Package + "::" + q.Name
+}
+
 // NumberLit represents a numeric literal
 type NumberLit struct {
 	Value string
@@ -930,6 +943,7 @@ func (p *Parser) parsePrimary() (Expr, error) {
 
 // parseMessageSend parses: receiver selector or receiver key1: arg1 key2: arg2
 // Called after @ has been consumed
+// Supports qualified names: @ Pkg::Class selector
 func (p *Parser) parseMessageSend() (Expr, error) {
 	// Parse receiver (must be an identifier for now)
 	if p.peek().Type != ast.TokenIdentifier {
@@ -941,6 +955,26 @@ func (p *Parser) parseMessageSend() (Expr, error) {
 
 	isSelf := receiverName == "self"
 	var receiver Expr = &Identifier{Name: receiverName}
+
+	// Check for qualified name: Pkg::Class
+	if p.peek().Type == ast.TokenNamespaceSep {
+		p.advance() // consume ::
+
+		// Next must be the class name
+		if p.peek().Type != ast.TokenIdentifier {
+			return nil, fmt.Errorf("expected class name after ::, got %s", p.peek().Type)
+		}
+		className := p.peek().Value
+		p.advance() // consume class name
+
+		// Create qualified name as receiver
+		receiver = &QualifiedName{
+			Package: receiverName,
+			Name:    className,
+		}
+		// Qualified names like Pkg::Class are never "self"
+		isSelf = false
+	}
 
 	// Check what follows - unary or keyword message?
 	if p.atEnd() || p.peek().Type == ast.TokenNewline || p.peek().Type == ast.TokenDot || p.peek().Type == ast.TokenRBracket {

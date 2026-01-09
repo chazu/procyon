@@ -230,6 +230,102 @@ func TestParseBlockExpr(t *testing.T) {
 	}
 }
 
+func TestParseQualifiedName(t *testing.T) {
+	tests := []struct {
+		name         string
+		tokens       []ast.Token
+		wantPackage  string
+		wantClass    string
+		wantSelector string
+	}{
+		{
+			name: "qualified class message send",
+			tokens: []ast.Token{
+				{Type: ast.TokenAt, Value: "@"},
+				{Type: ast.TokenIdentifier, Value: "Yutani"},
+				{Type: ast.TokenNamespaceSep, Value: "::"},
+				{Type: ast.TokenIdentifier, Value: "Widget"},
+				{Type: ast.TokenIdentifier, Value: "new"},
+			},
+			wantPackage:  "Yutani",
+			wantClass:    "Widget",
+			wantSelector: "new",
+		},
+		{
+			name: "qualified class with keyword message",
+			tokens: []ast.Token{
+				{Type: ast.TokenAt, Value: "@"},
+				{Type: ast.TokenIdentifier, Value: "Core"},
+				{Type: ast.TokenNamespaceSep, Value: "::"},
+				{Type: ast.TokenIdentifier, Value: "Array"},
+				{Type: ast.TokenKeyword, Value: "with:"},
+				{Type: ast.TokenNumber, Value: "42"},
+			},
+			wantPackage:  "Core",
+			wantClass:    "Array",
+			wantSelector: "with_",
+		},
+		{
+			name: "unqualified class message send",
+			tokens: []ast.Token{
+				{Type: ast.TokenAt, Value: "@"},
+				{Type: ast.TokenIdentifier, Value: "Counter"},
+				{Type: ast.TokenIdentifier, Value: "new"},
+			},
+			wantPackage:  "",
+			wantClass:    "Counter",
+			wantSelector: "new",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newParser(tt.tokens)
+			result, err := p.parsePrimary()
+			if err != nil {
+				t.Fatalf("parsePrimary() error = %v", err)
+			}
+
+			msg, ok := result.(*MessageSend)
+			if !ok {
+				t.Fatalf("expected MessageSend, got %T", result)
+			}
+
+			if msg.Selector != tt.wantSelector {
+				t.Errorf("Selector = %q, want %q", msg.Selector, tt.wantSelector)
+			}
+
+			if tt.wantPackage != "" {
+				// Should be a QualifiedName
+				qn, ok := msg.Receiver.(*QualifiedName)
+				if !ok {
+					t.Fatalf("expected QualifiedName receiver, got %T", msg.Receiver)
+				}
+				if qn.Package != tt.wantPackage {
+					t.Errorf("Package = %q, want %q", qn.Package, tt.wantPackage)
+				}
+				if qn.Name != tt.wantClass {
+					t.Errorf("Name = %q, want %q", qn.Name, tt.wantClass)
+				}
+				// Test FullName method
+				expectedFullName := tt.wantPackage + "::" + tt.wantClass
+				if qn.FullName() != expectedFullName {
+					t.Errorf("FullName() = %q, want %q", qn.FullName(), expectedFullName)
+				}
+			} else {
+				// Should be an Identifier
+				ident, ok := msg.Receiver.(*Identifier)
+				if !ok {
+					t.Fatalf("expected Identifier receiver, got %T", msg.Receiver)
+				}
+				if ident.Name != tt.wantClass {
+					t.Errorf("Name = %q, want %q", ident.Name, tt.wantClass)
+				}
+			}
+		})
+	}
+}
+
 func TestParseIterationExpr(t *testing.T) {
 	tests := []struct {
 		name       string
