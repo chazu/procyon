@@ -192,6 +192,28 @@ func (b *BashBackend) generateStatement(stmt ir.Statement) error {
 
 // generateAssign generates an assignment statement
 func (b *BashBackend) generateAssign(s *ir.AssignStmt) error {
+	// Check for arithmetic expressions - use (( )) without subshell for Procyon compatibility
+	if isArithmeticExpr(s.Value) {
+		arithExpr, err := b.generateArithExpr(s.Value)
+		if err != nil {
+			return err
+		}
+
+		switch s.Kind {
+		case ir.AssignIVar:
+			// For ivars: use temp var pattern to avoid subshell
+			b.writef("local __arith__; (( __arith__ = %s )); _ivar_set %s \"$__arith__\"\n", arithExpr, s.Target)
+		case ir.AssignClassVar:
+			// For cvars: use temp var pattern to avoid subshell
+			b.writef("local __arith__; (( __arith__ = %s )); __%s__%s=\"$__arith__\"\n", arithExpr, b.className(), s.Target)
+		default:
+			// For locals: use (( var = expr )) directly
+			b.writef("(( %s = %s ))\n", s.Target, arithExpr)
+		}
+		return nil
+	}
+
+	// Non-arithmetic assignment - use normal generation
 	exprStr, err := b.generateExpr(s.Value)
 	if err != nil {
 		return err
@@ -703,4 +725,57 @@ func stripDollar(s string) string {
 		return s[1:]
 	}
 	return s
+}
+
+// isArithmeticExpr returns true if the expression is an arithmetic operation
+func isArithmeticExpr(expr ir.Expression) bool {
+	switch e := expr.(type) {
+	case *ir.BinaryExpr:
+		switch e.Op {
+		case "+", "-", "*", "/", "%":
+			return true
+		}
+	case *ir.UnaryExpr:
+		if e.Op == "-" {
+			return true
+		}
+	}
+	return false
+}
+
+// generateArithExpr generates an arithmetic expression without the $(( )) wrapper
+// This is used inside (( )) commands for Procyon compatibility
+func (b *BashBackend) generateArithExpr(expr ir.Expression) (string, error) {
+	switch e := expr.(type) {
+	case *ir.BinaryExpr:
+		left, err := b.generateArithExpr(e.Left)
+		if err != nil {
+			return "", err
+		}
+		right, err := b.generateArithExpr(e.Right)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("(%s %s %s)", left, e.Op, right), nil
+	case *ir.UnaryExpr:
+		operand, err := b.generateArithExpr(e.Operand)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("(-%s)", operand), nil
+	case *ir.VarRefExpr:
+		switch e.Kind {
+		case ir.VarIVar:
+			return fmt.Sprintf("$(_ivar %s)", e.Name), nil
+		case ir.VarClassVar:
+			return fmt.Sprintf("${__%s__%s}", b.className(), e.Name), nil
+		default:
+			return fmt.Sprintf("$%s", e.Name), nil
+		}
+	case *ir.LiteralExpr:
+		return fmt.Sprintf("%v", e.Value), nil
+	default:
+		// Fall back to regular expression generation
+		return b.generateExpr(expr)
+	}
 }
