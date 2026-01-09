@@ -9,7 +9,9 @@ require (
 
 require (
 	github.com/ebitengine/purego v0.5.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
+	github.com/mattn/go-sqlite3 v1.14.33 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 )
