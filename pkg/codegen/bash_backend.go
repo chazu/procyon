@@ -102,8 +102,9 @@ func (b *BashBackend) generateSourceEmbedding() {
 	b.writef("__%s__source() {\n", className)
 	b.indent++
 	b.writeln("cat <<'__TRASHTALK_SOURCE_EOF__'")
-	b.writeln("# Source not available in IR compilation mode")
-	b.writeln("__TRASHTALK_SOURCE_EOF__")
+	// Note: heredoc content must not have leading indentation for the terminator
+	b.buf.WriteString("# Source not available in IR compilation mode\n")
+	b.buf.WriteString("__TRASHTALK_SOURCE_EOF__\n")
 	b.indent--
 	b.writeln("}")
 	b.writeln("")
@@ -669,6 +670,38 @@ func (b *BashBackend) generateJSONPrimitive(e *ir.JSONPrimitiveExpr) (string, er
 
 	case "arrayIsEmpty":
 		return fmt.Sprintf("$(echo \"%s\" | jq 'length == 0')", receiver), nil
+
+	case "objectLength":
+		return fmt.Sprintf("$(echo \"%s\" | jq 'length')", receiver), nil
+
+	case "objectIsEmpty":
+		return fmt.Sprintf("$(echo \"%s\" | jq 'length == 0')", receiver), nil
+
+	case "objectHasKey":
+		if len(e.Args) < 1 {
+			return "", fmt.Errorf("objectHasKey requires key argument")
+		}
+		key, err := b.generateExpr(e.Args[0])
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("$(echo \"%s\" | jq -r --arg k \"%s\" 'has($k)')", receiver, key), nil
+
+	case "objectKeys":
+		return fmt.Sprintf("$(echo \"%s\" | jq -c 'keys')", receiver), nil
+
+	case "objectValues":
+		return fmt.Sprintf("$(echo \"%s\" | jq -c '[.[]]')", receiver), nil
+
+	case "objectRemoveKey":
+		if len(e.Args) < 1 {
+			return "", fmt.Errorf("objectRemoveKey requires key argument")
+		}
+		key, err := b.generateExpr(e.Args[0])
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("$(echo \"%s\" | jq -c --arg k \"%s\" 'del(.[$k])')", receiver, key), nil
 
 	default:
 		return "", fmt.Errorf("unsupported JSON operation: %s", e.Operation)

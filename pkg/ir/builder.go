@@ -731,6 +731,20 @@ func tokensToRawBash(tokens []ast.Token) string {
 			// No space before or after equals in assignments
 			result.WriteString("=")
 
+		case "MINUS":
+			// Check if this is a test flag like -n, -z, -e, -eq, -ne, etc
+			result.WriteString(tok.Value)
+			// Don't add space if next is identifier that looks like a test flag
+			if i+1 < len(tokens) {
+				next := tokens[i+1]
+				// Common test flags: -n, -z, -e, -f, -d, -eq, -ne, -lt, -gt, -le, -ge
+				if next.Type == "IDENTIFIER" && isBashTestFlag(next.Value) {
+					// This is a test flag, don't add space
+				} else if next.Type != "NEWLINE" {
+					result.WriteString(" ")
+				}
+			}
+
 		case "DSTRING", "SSTRING", "SUBSHELL", "VARIABLE":
 			// These tokens include their delimiters - just add them
 			result.WriteString(tok.Value)
@@ -749,15 +763,53 @@ func tokensToRawBash(tokens []ast.Token) string {
 				}
 			}
 
-		default:
+		case "LT":
+			result.WriteString(tok.Value)
+			// Check if this LT is adjacent to next token (for << or <( process substitution)
+			if i+1 < len(tokens) {
+				next := tokens[i+1]
+				// If next token is on same line and adjacent (col difference = 1), no space
+				// Otherwise add a space
+				if tok.Line == next.Line && next.Col == tok.Col+1 {
+					// Adjacent, no space (for <<, <()
+				} else if next.Type != "NEWLINE" {
+					result.WriteString(" ")
+				}
+			}
+
+		case "LPAREN":
+			result.WriteString(tok.Value)
+			// No space after opening paren
+
+		case "RPAREN":
 			result.WriteString(tok.Value)
 			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" {
+				result.WriteString(" ")
+			}
+
+		default:
+			result.WriteString(tok.Value)
+			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" && tokens[i+1].Type != "RPAREN" {
 				result.WriteString(" ")
 			}
 		}
 	}
 
 	return strings.TrimSpace(result.String())
+}
+
+// isBashTestFlag returns true if the identifier is a bash test flag
+func isBashTestFlag(s string) bool {
+	// Single-letter test flags: -n, -z, -e, -f, -d, -r, -w, -x, -s, -L, etc.
+	if len(s) == 1 {
+		return true
+	}
+	// Multi-letter test flags: -eq, -ne, -lt, -gt, -le, -ge, -nt, -ot, -ef
+	switch s {
+	case "eq", "ne", "lt", "gt", "le", "ge", "nt", "ot", "ef":
+		return true
+	}
+	return false
 }
 
 // parseDefaultValue converts an AST default value to an IR Value.
