@@ -67,6 +67,12 @@ var primitiveRegistry = map[string]map[string]bool{
 		"unset_":  true,
 		"has_":    true,
 	},
+	"Console": {
+		"print_":  true,
+		"write_":  true,
+		"error_":  true,
+		"newline": true,
+	},
 	// More classes can be added here as we implement them
 }
 
@@ -88,6 +94,8 @@ func (g *generator) generatePrimitiveMethod(f *jen.File, m *compiledMethod) bool
 		return g.generatePrimitiveMethodFile(f, m)
 	case "Env":
 		return g.generatePrimitiveMethodEnv(f, m)
+	case "Console":
+		return g.generatePrimitiveMethodConsole(f, m)
 	default:
 		return false
 	}
@@ -861,6 +869,50 @@ func (g *generator) generatePrimitiveMethodEnv(f *jen.File, m *compiledMethod) b
 				jen.Return(jen.Lit("true"), jen.Nil()),
 			),
 			jen.Return(jen.Lit("false"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodConsole generates native Console class methods.
+func (g *generator) generatePrimitiveMethodConsole(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "print_":
+		// Print message to stdout with newline
+		f.Func().Id(m.goName).Params(jen.Id("message").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Qual("fmt", "Println").Call(jen.Id("message")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "write_":
+		// Print message to stdout without newline
+		f.Func().Id(m.goName).Params(jen.Id("message").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Qual("fmt", "Print").Call(jen.Id("message")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "error_":
+		// Print message to stderr with newline
+		f.Func().Id(m.goName).Params(jen.Id("message").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Qual("fmt", "Fprintln").Call(jen.Qual("os", "Stderr"), jen.Id("message")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "newline":
+		// Print a blank line
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Qual("fmt", "Println").Call(),
+			jen.Return(jen.Lit(""), jen.Nil()),
 		)
 		f.Line()
 		return true

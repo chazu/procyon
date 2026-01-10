@@ -1048,11 +1048,18 @@ func (g *generator) generateClassDispatch(f *jen.File, methods []*compiledMethod
 		} else {
 			// No args - direct call to package-level function
 			callExpr = jen.Id(m.goName).Call()
-			if m.hasReturn {
+			if m.returnsErr {
+				// Function already returns (string, error)
+				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
+					jen.Return(callExpr),
+				))
+			} else if m.hasReturn {
+				// Function returns only a value, wrap with nil error
 				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
 					jen.Return(callExpr, jen.Nil()),
 				))
 			} else {
+				// No return - call and return empty
 				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
 					callExpr,
 					jen.Return(jen.Lit(""), jen.Nil()),
