@@ -10,6 +10,11 @@ import (
 // The actual implementation is in generatePrimitiveMethod.
 var primitiveRegistry = map[string]map[string]bool{
 	"File": {
+		// Factory class methods
+		"at_":            true,
+		"temp":           true,
+		"tempWithPrefix_": true,
+		"mkfifo_":        true,
 		// Instance methods
 		"read":             true,
 		"write_":           true,
@@ -91,6 +96,153 @@ func (g *generator) generatePrimitiveMethod(f *jen.File, m *compiledMethod) bool
 // generatePrimitiveMethodFile generates native File class methods.
 func (g *generator) generatePrimitiveMethodFile(f *jen.File, m *compiledMethod) bool {
 	switch m.selector {
+	// Factory class methods
+	case "at_":
+		// Create a File instance at the given path
+		f.Func().Id(m.goName).Params(jen.Id("filepath").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Generate instance ID"),
+			jen.Id("id").Op(":=").Lit("file_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.Comment("Create instance in database"),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("File").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("File"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Path"):      jen.Id("filepath"),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "temp":
+		// Create a temporary file and return File instance
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Create temp file"),
+			jen.List(jen.Id("tmpfile"), jen.Err()).Op(":=").Qual("os", "CreateTemp").Call(jen.Lit(""), jen.Lit("trashtalk-*")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("tmpfile").Dot("Close").Call(),
+			jen.Line(),
+			jen.Comment("Generate instance ID"),
+			jen.Id("id").Op(":=").Lit("file_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.Comment("Create instance in database"),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("File").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("File"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Path"):      jen.Id("tmpfile").Dot("Name").Call(),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "tempWithPrefix_":
+		// Create a temporary file with prefix and return File instance
+		f.Func().Id(m.goName).Params(jen.Id("prefix").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Create temp file with prefix"),
+			jen.List(jen.Id("tmpfile"), jen.Err()).Op(":=").Qual("os", "CreateTemp").Call(jen.Lit(""), jen.Id("prefix").Op("+").Lit("*")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("tmpfile").Dot("Close").Call(),
+			jen.Line(),
+			jen.Comment("Generate instance ID"),
+			jen.Id("id").Op(":=").Lit("file_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.Comment("Create instance in database"),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("File").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("File"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Path"):      jen.Id("tmpfile").Dot("Name").Call(),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "mkfifo_":
+		// Create a named pipe (FIFO) and return File instance
+		f.Func().Id(m.goName).Params(jen.Id("filepath").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Create FIFO (named pipe)"),
+			jen.If(jen.Err().Op(":=").Qual("syscall", "Mkfifo").Call(jen.Id("filepath"), jen.Lit(0644)), jen.Err().Op("!=").Nil()).Block(
+				jen.Comment("Ignore error if FIFO already exists"),
+				jen.If(jen.Op("!").Qual("os", "IsExist").Call(jen.Err())).Block(
+					jen.Return(jen.Lit(""), jen.Err()),
+				),
+			),
+			jen.Line(),
+			jen.Comment("Generate instance ID"),
+			jen.Id("id").Op(":=").Lit("file_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.Comment("Create instance in database"),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("File").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("File"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Path"):      jen.Id("filepath"),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
 	case "read":
 		// Instance method: read file at self.path
 		f.Func().Parens(jen.Id("c").Op("*").Id("File")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
