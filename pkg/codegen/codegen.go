@@ -1207,8 +1207,13 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 					expr = jen.Id("_toStr").Call(g.generateExpr(s.Value, m))
 				}
 			case *parser.BinaryExpr:
-				// Arithmetic expression - result is int, need to convert to string
-				expr = jen.Qual("strconv", "Itoa").Call(g.generateExpr(s.Value, m))
+				if v.Op == "," {
+					// String concatenation - already returns string
+					expr = g.generateExpr(s.Value, m)
+				} else {
+					// Arithmetic expression - result is int, need to convert to string
+					expr = jen.Qual("strconv", "Itoa").Call(g.generateExpr(s.Value, m))
+				}
 			case *parser.StringLit:
 				// String literal - already a string
 				expr = g.generateExpr(s.Value, m)
@@ -1686,7 +1691,13 @@ func (g *generator) generateExprAsString(expr parser.Expr, m *compiledMethod) *j
 func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.Statement {
 	switch e := expr.(type) {
 	case *parser.BinaryExpr:
-		// Wrap in toInt() for interface{} compatibility
+		// String concatenation with comma operator
+		if e.Op == "," {
+			left := g.generateStringArg(e.Left, m)
+			right := g.generateStringArg(e.Right, m)
+			return left.Op("+").Add(right)
+		}
+		// Wrap in toInt() for interface{} compatibility (arithmetic)
 		left := jen.Id("toInt").Call(g.generateExpr(e.Left, m))
 		right := jen.Id("toInt").Call(g.generateExpr(e.Right, m))
 		switch e.Op {
@@ -1902,13 +1913,22 @@ func (g *generator) generateStringArg(expr parser.Expr, m *compiledMethod) *jen.
 				return jen.Id(e.Name) // Use original string parameter
 			}
 		}
-		// Otherwise, fall through to normal generation
-		return g.generateExpr(expr, m)
+		// Local variables are interface{}, wrap in _toStr for string conversion
+		return jen.Id("_toStr").Call(g.generateExpr(expr, m))
 	case *parser.StringLit:
 		return jen.Lit(e.Value)
+	case *parser.BinaryExpr:
+		if e.Op == "," {
+			// Nested concatenation - recursively handle
+			left := g.generateStringArg(e.Left, m)
+			right := g.generateStringArg(e.Right, m)
+			return left.Op("+").Add(right)
+		}
+		// Arithmetic expression - wrap result in _toStr
+		return jen.Id("_toStr").Call(g.generateExpr(expr, m))
 	default:
-		// For other expressions, use normal generation
-		return g.generateExpr(expr, m)
+		// For other expressions, wrap in _toStr for string conversion
+		return jen.Id("_toStr").Call(g.generateExpr(expr, m))
 	}
 }
 

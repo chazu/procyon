@@ -151,6 +151,7 @@ const (
 	TokenEquals  = "EQUALS"  // = (single equals, for comparisons)
 	TokenPercent = "PERCENT" // % (modulo)
 	TokenDot     = "DOT"     // . (statement separator)
+	TokenComma   = "COMMA"   // , (string concatenation)
 
 	// Control flow
 	TokenKeyword = "KEYWORD" // identifier followed by colon (e.g., "ifTrue:")

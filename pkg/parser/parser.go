@@ -659,7 +659,7 @@ func (p *Parser) parseExpr() (Expr, error) {
 }
 
 func (p *Parser) parseComparison() (Expr, error) {
-	left, err := p.parseAddSub()
+	left, err := p.parseConcat()
 	if err != nil {
 		return nil, err
 	}
@@ -686,11 +686,35 @@ func (p *Parser) parseComparison() (Expr, error) {
 		}
 
 		p.advance()
-		right, err := p.parseAddSub()
+		right, err := p.parseConcat()
 		if err != nil {
 			return nil, err
 		}
 		left = &ComparisonExpr{Left: left, Op: op, Right: right}
+	}
+
+	return left, nil
+}
+
+// parseConcat handles string concatenation with comma operator
+func (p *Parser) parseConcat() (Expr, error) {
+	left, err := p.parseAddSub()
+	if err != nil {
+		return nil, err
+	}
+
+	for !p.atEnd() {
+		tok := p.peek()
+		if tok.Type == ast.TokenComma {
+			p.advance()
+			right, err := p.parseAddSub()
+			if err != nil {
+				return nil, err
+			}
+			left = &BinaryExpr{Left: left, Op: ",", Right: right}
+		} else {
+			break
+		}
 	}
 
 	return left, nil
