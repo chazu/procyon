@@ -839,6 +839,13 @@ func (g *generator) generateDispatch(f *jen.File, methods []*compiledMethod) {
 	}
 
 	for _, m := range methods {
+		// Check if method name was renamed to avoid collision with ivar
+		// In Go, you can't have a struct field and method with the same name
+		methodName := m.goName
+		if !m.isClass && g.instanceVars[m.selector] {
+			methodName = "Get" + methodName
+		}
+
 		var callExpr *jen.Statement
 		if len(m.args) > 0 {
 			// Check args length
@@ -851,7 +858,7 @@ func (g *generator) generateDispatch(f *jen.File, methods []*compiledMethod) {
 			for i := range m.args {
 				callArgs = append(callArgs, jen.Id("args").Index(jen.Lit(i)))
 			}
-			callExpr = jen.Id("c").Dot(m.goName).Call(callArgs...)
+			callExpr = jen.Id("c").Dot(methodName).Call(callArgs...)
 
 			if m.returnsErr {
 				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
@@ -865,7 +872,7 @@ func (g *generator) generateDispatch(f *jen.File, methods []*compiledMethod) {
 				))
 			}
 		} else {
-			callExpr = jen.Id("c").Dot(m.goName).Call()
+			callExpr = jen.Id("c").Dot(methodName).Call()
 			if m.hasReturn {
 				if m.returnsErr {
 					// Method returns (string, error) - don't add extra nil
@@ -1007,6 +1014,14 @@ func (g *generator) generateMethod(f *jen.File, m *compiledMethod) {
 		}
 	}
 
+	// Check if method name collides with an instance variable (Go doesn't allow this)
+	// If it's a simple getter (no args, returns the ivar), rename to Get<Name>
+	methodName := m.goName
+	if !m.isClass && g.instanceVars[strings.ToLower(m.selector)] {
+		// Method name matches an ivar - rename to avoid Go collision
+		methodName = "Get" + methodName
+	}
+
 	// Build parameter list (sanitize Go keywords)
 	params := []jen.Code{}
 	for _, arg := range m.args {
@@ -1031,16 +1046,16 @@ func (g *generator) generateMethod(f *jen.File, m *compiledMethod) {
 	if m.isClass {
 		// Class methods are package-level functions (no receiver)
 		if returnType != nil {
-			f.Func().Id(m.goName).Params(params...).Add(returnType).Block(body...)
+			f.Func().Id(methodName).Params(params...).Add(returnType).Block(body...)
 		} else {
-			f.Func().Id(m.goName).Params(params...).Block(body...)
+			f.Func().Id(methodName).Params(params...).Block(body...)
 		}
 	} else {
 		// Instance methods have receiver
 		if returnType != nil {
-			f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(params...).Add(returnType).Block(body...)
+			f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(methodName).Params(params...).Add(returnType).Block(body...)
 		} else {
-			f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(params...).Block(body...)
+			f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(methodName).Params(params...).Block(body...)
 		}
 	}
 	f.Line()
@@ -1610,21 +1625,13 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 
 	case *parser.Identifier:
 		name := e.Name
-		// Check if it's self (the receiver)
-		if name == "self" {
+		// Check if it's self (the receiver) - only valid for instance methods
+		if name == "self" && !m.isClass {
 			return jen.Id("c")
 		}
-		// Check if it's an instance variable
-		if g.instanceVars[name] {
-			fieldAccess := jen.Id("c").Dot(capitalize(name))
-			// JSON vars are json.RawMessage, need to convert to string
-			if g.jsonVars[name] {
-				return jen.String().Parens(fieldAccess)
-			}
-			return fieldAccess
-		}
-		// Check if it's a method arg (params are strings, use as-is)
-		// But check renamedVars first in case it was renamed to avoid Go keyword conflict
+		// Check if it's a method arg FIRST (params are strings, use as-is)
+		// This must come before instance var check to handle cases where
+		// a method param has the same name as an instance var
 		for _, arg := range m.args {
 			if arg == name {
 				if renamed, ok := m.renamedVars[name]; ok {
@@ -1632,6 +1639,15 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 				}
 				return jen.Id(name)
 			}
+		}
+		// Check if it's an instance variable (only for instance methods)
+		if !m.isClass && g.instanceVars[name] {
+			fieldAccess := jen.Id("c").Dot(capitalize(name))
+			// JSON vars are json.RawMessage, need to convert to string
+			if g.jsonVars[name] {
+				return jen.String().Parens(fieldAccess)
+			}
+			return fieldAccess
 		}
 		// Check if this variable was renamed to avoid Go builtin conflict
 		if renamed, ok := m.renamedVars[name]; ok {

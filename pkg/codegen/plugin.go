@@ -279,6 +279,13 @@ func (g *generator) generatePluginDispatch(f *jen.File, methods []*compiledMetho
 
 	cases := []jen.Code{}
 	for _, m := range methods {
+		// Check if method name was renamed to avoid collision with ivar
+		// In Go, you can't have a struct field and method with the same name
+		methodName := m.goName
+		if g.instanceVars[m.selector] {
+			methodName = "Get" + methodName
+		}
+
 		var callExpr *jen.Statement
 		if len(m.args) > 0 {
 			// Check args length
@@ -291,7 +298,7 @@ func (g *generator) generatePluginDispatch(f *jen.File, methods []*compiledMetho
 			for i := range m.args {
 				callArgs = append(callArgs, jen.Id("args").Index(jen.Lit(i)))
 			}
-			callExpr = jen.Id("c").Dot(m.goName).Call(callArgs...)
+			callExpr = jen.Id("c").Dot(methodName).Call(callArgs...)
 
 			if m.returnsErr {
 				cases = append(cases, jen.Case(jen.Lit(m.selector)).Block(
@@ -305,7 +312,7 @@ func (g *generator) generatePluginDispatch(f *jen.File, methods []*compiledMetho
 				))
 			}
 		} else {
-			callExpr = jen.Id("c").Dot(m.goName).Call()
+			callExpr = jen.Id("c").Dot(methodName).Call()
 			if m.hasReturn {
 				if m.returnsErr {
 					// Method returns (string, error) - don't add extra nil
