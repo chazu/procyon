@@ -576,20 +576,39 @@ func (b *BashBackend) generateMessageSend(e *ir.MessageSendExpr) (string, error)
 
 // generateBlockExpr generates a block/closure expression
 func (b *BashBackend) generateBlockExpr(e *ir.BlockExpr) (string, error) {
-	// Blocks in Bash are represented as functions or inline code
-	// For now, generate a subshell with the block body
-	var body strings.Builder
+	// If the block has a single expression statement, extract and evaluate it
+	// This is common for condition blocks like [i < len]
+	if len(e.Body) == 1 {
+		if exprStmt, ok := e.Body[0].(*ir.ExprStmt); ok {
+			return b.generateExpr(exprStmt.Expr)
+		}
+	}
 
+	// For more complex blocks, generate inline bash code
+	var stmts []string
 	for _, stmt := range e.Body {
-		// This is a simplification - real implementation would be more complex
-		stmtStr := fmt.Sprintf("%v", stmt)
-		body.WriteString(stmtStr)
+		// Save current buffer state and use a temporary one
+		origBuf := b.buf
+		b.buf = strings.Builder{}
+
+		if err := b.generateStatement(stmt); err != nil {
+			b.buf = origBuf
+			return "", err
+		}
+
+		stmtCode := strings.TrimSpace(b.buf.String())
+		b.buf = origBuf
+
+		if stmtCode != "" {
+			stmts = append(stmts, stmtCode)
+		}
 	}
 
-	if len(e.Params) > 0 {
-		return fmt.Sprintf("{ %s; }", body.String()), nil
+	if len(stmts) == 0 {
+		return ":", nil // no-op
 	}
-	return fmt.Sprintf("{ %s; }", body.String()), nil
+
+	return strings.Join(stmts, "; "), nil
 }
 
 // generateSubshell generates a subshell expression
