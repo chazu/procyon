@@ -64,15 +64,16 @@ type DefaultValue struct {
 
 // Method represents a method definition.
 type Method struct {
-	Type     string   `json:"type"`     // Always "method"
-	Kind     string   `json:"kind"`     // "instance" or "class"
-	Raw      bool     `json:"raw"`      // True if this is a raw method (can't compile)
-	Selector string   `json:"selector"` // Method name (e.g., "increment", "setValue_")
-	Keywords []string `json:"keywords"` // For keyword methods (e.g., ["setValue"])
-	Args     []string `json:"args"`     // Argument names
-	Pragmas  []string `json:"pragmas"`  // Method pragmas (e.g., ["procyonOnly", "direct"])
-	Body     Block    `json:"body"`
-	Location Location `json:"location"`
+	Type      string   `json:"type"`      // Always "method"
+	Kind      string   `json:"kind"`      // "instance" or "class"
+	Raw       bool     `json:"raw"`       // True if this is a raw method (can't compile)
+	Primitive bool     `json:"primitive"` // True if this is a primitive method (has native Procyon impl)
+	Selector  string   `json:"selector"`  // Method name (e.g., "increment", "setValue_")
+	Keywords  []string `json:"keywords"`  // For keyword methods (e.g., ["setValue"])
+	Args      []string `json:"args"`      // Argument names
+	Pragmas   []string `json:"pragmas"`   // Method pragmas (e.g., ["procyonOnly", "direct"])
+	Body      Block    `json:"body"`
+	Location  Location `json:"location"`
 }
 
 // HasPragma checks if the method has a specific pragma.

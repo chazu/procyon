@@ -63,7 +63,8 @@ type compiledMethod struct {
 	hasReturn   bool
 	isClass     bool
 	returnsErr  bool
-	renamedVars map[string]string // Original name -> safe Go name
+	primitive   bool                   // True if this is a primitive method with native impl
+	renamedVars map[string]string      // Original name -> safe Go name
 }
 
 func (g *generator) generate() *Result {
@@ -743,11 +744,40 @@ func (g *generator) compileMethods() []*compiledMethod {
 		// Skip raw methods unless:
 		// - procyonOnly pragma: Bash gets error stub, Procyon provides impl
 		// - procyonNative pragma: Bash uses rawMethod body, Procyon provides native impl
-		if m.Raw && !m.HasPragma("procyonOnly") && !m.HasPragma("procyonNative") {
+		// - primitive: method has native Procyon implementation
+		if m.Raw && !m.Primitive && !m.HasPragma("procyonOnly") && !m.HasPragma("procyonNative") {
 			g.skipped = append(g.skipped, SkippedMethod{
 				Selector: m.Selector,
 				Reason:   "raw method",
 			})
+			continue
+		}
+
+		// Handle primitive methods - these have native Procyon implementations
+		// The bash fallback code in the body is ignored; Procyon provides the native impl
+		if m.Primitive {
+			if hasPrimitiveImpl(g.class.Name, m.Selector) {
+				compiled = append(compiled, &compiledMethod{
+					selector:    m.Selector,
+					goName:      selectorToGoName(m.Selector),
+					args:        m.Args,
+					body:        nil, // No parsed body - native impl provided
+					hasReturn:   true,
+					isClass:     m.Kind == "class",
+					returnsErr:  true,
+					primitive:   true,
+					renamedVars: make(map[string]string),
+				})
+			} else {
+				// No native impl registered - warn but still fall back to bash
+				g.warnings = append(g.warnings,
+					fmt.Sprintf("primitive method %s.%s has no native implementation, using bash fallback",
+						g.class.Name, m.Selector))
+				g.skipped = append(g.skipped, SkippedMethod{
+					Selector: m.Selector,
+					Reason:   "primitive method without native implementation",
+				})
+			}
 			continue
 		}
 
@@ -1010,6 +1040,13 @@ func (g *generator) generateMethod(f *jen.File, m *compiledMethod) {
 	// Special handling for GrpcClient class - wire methods to gRPC helpers
 	if g.class.Name == "GrpcClient" && !m.isClass {
 		if g.generateGrpcClientMethod(f, m) {
+			return
+		}
+	}
+
+	// Handle primitive methods - these have native Procyon implementations
+	if m.primitive {
+		if g.generatePrimitiveMethod(f, m) {
 			return
 		}
 	}
