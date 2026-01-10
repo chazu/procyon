@@ -14,11 +14,12 @@ import (
 // The output can be built with: go build -buildmode=c-shared -o Class.so
 func GeneratePlugin(class *ast.Class) *Result {
 	g := &generator{
-		class:        class,
-		warnings:     []string{},
-		skipped:      []SkippedMethod{},
-		instanceVars: map[string]bool{},
-		jsonVars:     map[string]bool{},
+		class:          class,
+		warnings:       []string{},
+		skipped:        []SkippedMethod{},
+		instanceVars:   map[string]bool{},
+		jsonVars:       map[string]bool{},
+		skippedMethods: map[string]bool{},
 	}
 
 	// Build instance var lookup and track JSON-typed vars
@@ -71,6 +72,9 @@ func (g *generator) generatePlugin() *Result {
 	if g.class.Name == "GrpcClient" {
 		g.generateGrpcHelpers(f)
 	}
+
+	// First pass: identify which methods will be skipped (for @ self calls)
+	g.preIdentifySkippedMethods()
 
 	// Compile methods
 	compiled := g.compileMethods()

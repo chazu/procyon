@@ -27,11 +27,12 @@ type SkippedMethod struct {
 // Generate produces Go source code from a Trashtalk class AST.
 func Generate(class *ast.Class) *Result {
 	g := &generator{
-		class:        class,
-		warnings:     []string{},
-		skipped:      []SkippedMethod{},
-		instanceVars: map[string]bool{},
-		jsonVars:     map[string]bool{},
+		class:          class,
+		warnings:       []string{},
+		skipped:        []SkippedMethod{},
+		instanceVars:   map[string]bool{},
+		jsonVars:       map[string]bool{},
+		skippedMethods: map[string]bool{},
 	}
 
 	// Build instance var lookup and track JSON-typed vars
@@ -51,8 +52,9 @@ type generator struct {
 	class        *ast.Class
 	warnings     []string
 	skipped      []SkippedMethod
-	instanceVars map[string]bool
-	jsonVars     map[string]bool // vars with JSON default values (use json.RawMessage)
+	instanceVars    map[string]bool
+	jsonVars        map[string]bool   // vars with JSON default values (use json.RawMessage)
+	skippedMethods  map[string]bool   // methods that will fall back to bash (for @ self detection)
 }
 
 type compiledMethod struct {
@@ -70,12 +72,8 @@ type compiledMethod struct {
 func (g *generator) generate() *Result {
 	f := jen.NewFile("main")
 
-	// Note if class has traits (they fall back to Bash for now)
-	if len(g.class.Traits) > 0 {
-		g.warnings = append(g.warnings,
-			fmt.Sprintf("class includes %d trait(s): %v - trait methods fall back to Bash",
-				len(g.class.Traits), g.class.Traits))
-	}
+	// Note: Trait handling is done at parse time via MergeTraits().
+	// If traits were provided, their methods are already in g.class.Methods.
 
 	// Add blank imports for embed and sqlite3
 	f.Anon("embed")
@@ -120,6 +118,9 @@ func (g *generator) generate() *Result {
 	// Type conversion helpers for iteration
 	g.generateTypeHelpers(f)
 	f.Line()
+
+	// First pass: identify which methods will be skipped (for @ self calls)
+	g.preIdentifySkippedMethods()
 
 	// Compile methods and separate into class/instance
 	compiled := g.compileMethods()
@@ -726,6 +727,52 @@ func (g *generator) generateServeMode(f *jen.File) {
 			jen.Id("ExitCode"): jen.Lit(0),
 		})),
 	)
+}
+
+// preIdentifySkippedMethods runs through all methods to identify which will be skipped.
+// This is needed so that @ self calls can use sendMessage for skipped methods.
+func (g *generator) preIdentifySkippedMethods() {
+	for _, m := range g.class.Methods {
+		willSkip := false
+
+		// bashOnly pragma
+		if m.HasPragma("bashOnly") {
+			willSkip = true
+		}
+
+		// Raw methods (unless primitive or has procyon pragma)
+		if m.Raw && !m.Primitive && !m.HasPragma("procyonOnly") && !m.HasPragma("procyonNative") {
+			willSkip = true
+		}
+
+		// Primitive methods without native impl
+		if m.Primitive && !hasPrimitiveImpl(g.class.Name, m.Selector) {
+			willSkip = true
+		}
+
+		// Check for bash-specific function calls
+		for _, tok := range m.Body.Tokens {
+			if tok.Type == "IDENTIFIER" {
+				switch tok.Value {
+				case "_ivar", "_ivar_set", "_throw", "_on_error", "_ensure", "_pop_handler":
+					willSkip = true
+					break
+				}
+			}
+		}
+
+		// Try to parse - if unsupported, will skip
+		if !willSkip && !m.Raw && !m.Primitive {
+			result := parser.ParseMethod(m.Body.Tokens)
+			if result.Unsupported {
+				willSkip = true
+			}
+		}
+
+		if willSkip {
+			g.skippedMethods[m.Selector] = true
+		}
+	}
 }
 
 func (g *generator) compileMethods() []*compiledMethod {
@@ -1704,18 +1751,21 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 
 	case *parser.MessageSend:
 		if e.IsSelf {
-			// Check if target method is raw (will fall back to bash)
+			// Check if target method is raw or skipped (will fall back to bash)
 			// If so, use sendMessage to call bash runtime instead of direct Go call
-			isTargetRaw := false
-			for _, method := range g.class.Methods {
-				if method.Selector == e.Selector && method.Raw {
-					isTargetRaw = true
-					break
+			isTargetSkipped := g.skippedMethods[e.Selector]
+			if !isTargetSkipped {
+				// Also check if explicitly marked as raw
+				for _, method := range g.class.Methods {
+					if method.Selector == e.Selector && method.Raw {
+						isTargetSkipped = true
+						break
+					}
 				}
 			}
 
-			if isTargetRaw {
-				// Use sendMessage for raw methods that aren't compiled to Go
+			if isTargetSkipped {
+				// Use sendMessage for skipped/raw methods that aren't compiled to Go
 				args := []jen.Code{jen.Id("c"), jen.Lit(e.Selector)}
 				for _, arg := range e.Args {
 					args = append(args, g.generateExprAsString(arg, m))

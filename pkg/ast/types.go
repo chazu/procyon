@@ -1,6 +1,13 @@
 // Package ast defines types for the Trashtalk AST produced by the jq parser.
 package ast
 
+// CompilationUnit represents a class along with its included traits.
+// This is the preferred input format when traits need to be compiled in.
+type CompilationUnit struct {
+	Class  *Class            `json:"class"`
+	Traits map[string]*Class `json:"traits"` // Trait name -> Trait AST
+}
+
 // Class represents a Trashtalk class definition.
 type Class struct {
 	Type               string        `json:"type"`

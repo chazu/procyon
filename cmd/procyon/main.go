@@ -53,12 +53,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse AST
-	class, err := ast.ParseBytes(input)
+	// Parse AST (supports both plain Class and CompilationUnit with traits)
+	unit, err := ast.ParseCompilationUnit(input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing AST: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Merge trait methods into the class
+	merged, missing := unit.MergeTraits()
+	if len(merged) > 0 {
+		fmt.Fprintf(os.Stderr, "Merged trait methods: %v\n", merged)
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: traits not provided (will fall back to Bash): %v\n", missing)
+	}
+	class := unit.Class
 
 	// Generate code based on mode
 	var result *codegen.Result
