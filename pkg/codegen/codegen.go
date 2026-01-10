@@ -797,14 +797,8 @@ func (g *generator) compileMethods() []*compiledMethod {
 			continue
 		}
 
-		// Check if method has return
-		hasReturn := false
-		for _, stmt := range result.Body.Statements {
-			if _, ok := stmt.(*parser.Return); ok {
-				hasReturn = true
-				break
-			}
-		}
+		// Check if method has return (recursively check inside if blocks too)
+		hasReturn := hasReturnInStatements(result.Body.Statements)
 
 		// Check if any args require error handling (string to int conversion)
 		returnsErr := len(m.Args) > 0
@@ -1013,10 +1007,14 @@ func (g *generator) generateMethod(f *jen.File, m *compiledMethod) {
 		}
 	}
 
-	// Build parameter list
+	// Build parameter list (sanitize Go keywords)
 	params := []jen.Code{}
 	for _, arg := range m.args {
-		params = append(params, jen.Id(arg).String())
+		safeName := safeGoName(arg)
+		if safeName != arg {
+			m.renamedVars[arg] = safeName
+		}
+		params = append(params, jen.Id(safeName).String())
 	}
 
 	// Determine return type
@@ -1096,7 +1094,12 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 					}
 				}
 				if isMethodArg {
-					expr = jen.Id(v.Name) // Use original string parameter
+					// Use renamed parameter name if it conflicted with Go keyword
+					paramName := v.Name
+					if renamed, ok := m.renamedVars[v.Name]; ok {
+						paramName = renamed
+					}
+					expr = jen.Id(paramName)
 				} else if g.instanceVars[v.Name] {
 					// Assigning one ivar to another - already a string
 					expr = g.generateExpr(s.Value, m)
@@ -1161,11 +1164,31 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 		// Check if the return value is already a string (message sends, string literals, JSON primitives)
 		_, isMessageSend := s.Value.(*parser.MessageSend)
 		_, isStringLit := s.Value.(*parser.StringLit)
-		_, isJSONPrimitive := s.Value.(*parser.JSONPrimitiveExpr)
+		jsonPrim, isJSONPrimitive := s.Value.(*parser.JSONPrimitiveExpr)
 		// Check if return value is an instance variable (all are string typed)
 		isIvarReturn := false
 		if id, ok := s.Value.(*parser.Identifier); ok {
 			isIvarReturn = g.instanceVars[id.Name]
+		}
+		// Check if JSON primitive returns an array type (needs JSON encoding)
+		isArrayReturningPrimitive := false
+		if isJSONPrimitive {
+			switch jsonPrim.Operation {
+			case "objectKeys", "objectValues", "arrayCollect", "arraySelect":
+				isArrayReturningPrimitive = true
+			}
+		}
+		if isArrayReturningPrimitive {
+			// Array-returning primitives need JSON encoding
+			stmts := []jen.Code{
+				jen.List(jen.Id("_resultJSON"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(expr),
+			}
+			if m.returnsErr {
+				stmts = append(stmts, jen.Return(jen.String().Call(jen.Id("_resultJSON")), jen.Nil()))
+			} else {
+				stmts = append(stmts, jen.Return(jen.String().Call(jen.Id("_resultJSON"))))
+			}
+			return stmts
 		}
 		if isMessageSend || isStringLit || isJSONPrimitive || isIvarReturn {
 			// Already a string, no conversion needed
@@ -1601,8 +1624,12 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 			return fieldAccess
 		}
 		// Check if it's a method arg (params are strings, use as-is)
+		// But check renamedVars first in case it was renamed to avoid Go keyword conflict
 		for _, arg := range m.args {
 			if arg == name {
+				if renamed, ok := m.renamedVars[name]; ok {
+					return jen.Id(renamed)
+				}
 				return jen.Id(name)
 			}
 		}
@@ -2145,16 +2172,49 @@ func (g *generator) generateFilePrimitive(e *parser.ClassPrimitiveExpr, m *compi
 	}
 }
 
+// hasReturnInStatements recursively checks if any statement contains a return
+func hasReturnInStatements(stmts []parser.Statement) bool {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *parser.Return:
+			return true
+		case *parser.IfExpr:
+			// Check inside both branches
+			if hasReturnInStatements(s.TrueBlock) {
+				return true
+			}
+			if hasReturnInStatements(s.FalseBlock) {
+				return true
+			}
+		case *parser.WhileExpr:
+			// Check inside loop body
+			if hasReturnInStatements(s.Body) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // goBuiltins are Go builtin identifiers that cannot be used as variable names
 var goBuiltins = map[string]bool{
+	// Builtin functions
 	"len": true, "cap": true, "make": true, "new": true, "append": true,
 	"copy": true, "delete": true, "close": true, "panic": true, "recover": true,
 	"print": true, "println": true, "complex": true, "real": true, "imag": true,
+	// Constants
 	"true": true, "false": true, "nil": true, "iota": true,
+	// Types
 	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
 	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
 	"float32": true, "float64": true, "complex64": true, "complex128": true,
 	"byte": true, "rune": true, "string": true, "bool": true, "error": true,
+	// Go keywords (cannot be used as identifiers)
+	"break": true, "case": true, "chan": true, "const": true, "continue": true,
+	"default": true, "defer": true, "else": true, "fallthrough": true, "for": true,
+	"func": true, "go": true, "goto": true, "if": true, "import": true,
+	"interface": true, "map": true, "package": true, "range": true, "return": true,
+	"select": true, "struct": true, "switch": true, "type": true, "var": true,
 }
 
 // safeGoName returns a safe Go identifier, renaming if it conflicts with builtins
