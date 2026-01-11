@@ -1323,6 +1323,9 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 	case *parser.WhileExpr:
 		return g.generateWhileStatement(s, m)
 
+	case *parser.IfNilExpr:
+		return g.generateIfNilStatement(s, m)
+
 	case *parser.IterationExpr:
 		return g.generateIterationStatement(s, m)
 
@@ -1400,6 +1403,58 @@ func (g *generator) generateWhileStatement(s *parser.WhileExpr, m *compiledMetho
 	return []jen.Code{
 		jen.For(condition).Block(bodyStmts...),
 	}
+}
+
+// generateIfNilStatement generates Go if for Trashtalk ifNil:/ifNotNil:
+func (g *generator) generateIfNilStatement(s *parser.IfNilExpr, m *compiledMethod) []jen.Code {
+	subjectExpr := g.generateExpr(s.Subject, m)
+
+	// Generate nil block statements (for ifNil:)
+	var nilStmts []jen.Code
+	for _, stmt := range s.NilBlock {
+		nilStmts = append(nilStmts, g.generateStatement(stmt, m)...)
+	}
+
+	// Generate not-nil block statements (for ifNotNil:)
+	var notNilStmts []jen.Code
+
+	// If there's a binding variable, add it at the start of the block
+	if s.BindingVar != "" {
+		// bindingVar := subject
+		notNilStmts = append(notNilStmts, jen.Id(s.BindingVar).Op(":=").Add(subjectExpr))
+	}
+
+	for _, stmt := range s.NotNilBlock {
+		notNilStmts = append(notNilStmts, g.generateStatement(stmt, m)...)
+	}
+
+	// In Trashtalk, nil is empty string ""
+	// ifNil: means if subject == ""
+	// ifNotNil: means if subject != ""
+	nilCondition := subjectExpr.Clone().Op("==").Lit("")
+
+	if len(s.NilBlock) > 0 && len(s.NotNilBlock) > 0 {
+		// ifNil: [block1] ifNotNil: [block2]
+		// -> if subject == "" { block1 } else { block2 }
+		return []jen.Code{
+			jen.If(nilCondition).Block(nilStmts...).Else().Block(notNilStmts...),
+		}
+	} else if len(s.NilBlock) > 0 {
+		// ifNil: [block] only
+		// -> if subject == "" { block }
+		return []jen.Code{
+			jen.If(nilCondition).Block(nilStmts...),
+		}
+	} else if len(s.NotNilBlock) > 0 {
+		// ifNotNil: [block] only
+		// -> if subject != "" { block }
+		notNilCondition := subjectExpr.Clone().Op("!=").Lit("")
+		return []jen.Code{
+			jen.If(notNilCondition).Block(notNilStmts...),
+		}
+	}
+
+	return []jen.Code{jen.Comment("empty ifNil/ifNotNil")}
 }
 
 // generateIterationStatement generates Go for loop from Trashtalk do:/collect:/select:
@@ -2319,6 +2374,14 @@ func hasReturnInStatements(stmts []parser.Statement) bool {
 		case *parser.WhileExpr:
 			// Check inside loop body
 			if hasReturnInStatements(s.Body) {
+				return true
+			}
+		case *parser.IfNilExpr:
+			// Check inside both nil and not-nil blocks
+			if hasReturnInStatements(s.NilBlock) {
+				return true
+			}
+			if hasReturnInStatements(s.NotNilBlock) {
 				return true
 			}
 		}

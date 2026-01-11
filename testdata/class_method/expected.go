@@ -789,7 +789,7 @@ func (c *Widget) GetName() string {
 }
 
 func Description() string {
-	return "A widget class"
+	return "\"A widget class\""
 }
 
 func Version() string {

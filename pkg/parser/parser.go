@@ -125,6 +125,17 @@ type WhileExpr struct {
 func (WhileExpr) exprNode() {}
 func (WhileExpr) stmtNode() {}
 
+// IfNilExpr represents: value ifNil: [nilBlock] ifNotNil: [:v | notNilBlock]
+type IfNilExpr struct {
+	Subject     Expr        // The value being tested for nil
+	NilBlock    []Statement // Block to execute if nil (for ifNil:)
+	NotNilBlock []Statement // Block to execute if not nil (for ifNotNil:)
+	BindingVar  string      // Variable name for ifNotNil: binding (e.g., :v)
+}
+
+func (IfNilExpr) exprNode() {}
+func (IfNilExpr) stmtNode() {}
+
 // BlockExpr represents a block literal: [:param1 :param2 | body]
 type BlockExpr struct {
 	Params     []string
@@ -386,6 +397,10 @@ func (p *Parser) parseStatement() (Statement, error) {
 			return p.parseIfFalse(expr)
 		case "whileTrue:":
 			return p.parseWhileTrue(expr)
+		case "ifNil:":
+			return p.parseIfNil(expr)
+		case "ifNotNil:":
+			return p.parseIfNotNil(expr)
 		case "do:":
 			return p.parseDoIteration(expr)
 		case "collect:":
@@ -455,6 +470,85 @@ func (p *Parser) parseWhileTrue(condition Expr) (Statement, error) {
 	return &WhileExpr{
 		Condition: condition,
 		Body:      body,
+	}, nil
+}
+
+// parseIfNil parses: value ifNil: [block] [ifNotNil: [:v | block]]
+func (p *Parser) parseIfNil(subject Expr) (Statement, error) {
+	p.advance() // consume "ifNil:"
+
+	nilBlock, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for optional ifNotNil:
+	var notNilBlock []Statement
+	var bindingVar string
+	p.skipNewlines()
+	if p.peek().Type == ast.TokenKeyword && p.peek().Value == "ifNotNil:" {
+		p.advance() // consume "ifNotNil:"
+
+		// Check if we have a block with binding [:v | ...]
+		if p.peek().Type == ast.TokenLBracket {
+			block, err := p.parseBlockExpr()
+			if err != nil {
+				return nil, err
+			}
+			if len(block.Params) > 0 {
+				bindingVar = block.Params[0]
+			}
+			notNilBlock = block.Statements
+		} else {
+			// Simple block
+			notNilBlock, err = p.parseBlock()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return &IfNilExpr{
+		Subject:     subject,
+		NilBlock:    nilBlock,
+		NotNilBlock: notNilBlock,
+		BindingVar:  bindingVar,
+	}, nil
+}
+
+// parseIfNotNil parses: value ifNotNil: [:v | block]
+func (p *Parser) parseIfNotNil(subject Expr) (Statement, error) {
+	p.advance() // consume "ifNotNil:"
+
+	var notNilBlock []Statement
+	var bindingVar string
+
+	// Check if we have a block with binding [:v | ...]
+	if p.peek().Type == ast.TokenLBracket {
+		block, err := p.parseBlockExpr()
+		if err != nil {
+			return nil, err
+		}
+		if len(block.Params) > 0 {
+			bindingVar = block.Params[0]
+		}
+		notNilBlock = block.Statements
+	} else {
+		// Simple block
+		var err error
+		notNilBlock, err = p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// ifNotNil: alone means: if NOT nil, do block
+	// We represent this as IfNilExpr with only NotNilBlock set
+	return &IfNilExpr{
+		Subject:     subject,
+		NilBlock:    nil,
+		NotNilBlock: notNilBlock,
+		BindingVar:  bindingVar,
 	}, nil
 }
 
@@ -1022,11 +1116,16 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		p.advance()
 		return &Identifier{Name: tok.Value}, nil
 
-	case ast.TokenDString, ast.TokenSString, "STRING":
+	case ast.TokenDString, ast.TokenSString:
+		// jq-compiler already strips quotes from SSTRING/DSTRING values
 		p.advance()
-		// Remove quotes from the value
+		return &StringLit{Value: tok.Value}, nil
+
+	case "STRING":
+		// STRING tokens from other sources may still have quotes
+		p.advance()
 		val := tok.Value
-		if len(val) >= 2 {
+		if len(val) >= 2 && ((val[0] == '\'' && val[len(val)-1] == '\'') || (val[0] == '"' && val[len(val)-1] == '"')) {
 			val = val[1 : len(val)-1]
 		}
 		return &StringLit{Value: val}, nil
@@ -1195,10 +1294,16 @@ func (p *Parser) parseMessageArg() (Expr, error) {
 		p.advance()
 		return &Identifier{Name: tok.Value}, nil
 
-	case ast.TokenDString, ast.TokenSString, "STRING":
+	case ast.TokenDString, ast.TokenSString:
+		// jq-compiler already strips quotes from SSTRING/DSTRING values
+		p.advance()
+		return &StringLit{Value: tok.Value}, nil
+
+	case "STRING":
+		// STRING tokens from other sources may still have quotes
 		p.advance()
 		val := tok.Value
-		if len(val) >= 2 {
+		if len(val) >= 2 && ((val[0] == '\'' && val[len(val)-1] == '\'') || (val[0] == '"' && val[len(val)-1] == '"')) {
 			val = val[1 : len(val)-1]
 		}
 		return &StringLit{Value: val}, nil

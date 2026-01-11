@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-//go:embed Counter.trash
+//go:embed IfNilTest.trash
 var _sourceCode string
 
 var _contentHash string
@@ -32,19 +32,18 @@ func init() {
 
 var ErrUnknownSelector = errors.New("unknown selector")
 
-type Counter struct {
+type IfNilTest struct {
 	Class     string   `json:"class"`
 	CreatedAt string   `json:"created_at"`
 	Vars      []string `json:"_vars"`
 	Value     string   `json:"value"`
-	Step      string   `json:"step"`
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
-		fmt.Fprintln(os.Stderr, "       Counter.native --source")
-		fmt.Fprintln(os.Stderr, "       Counter.native --hash")
+		fmt.Fprintln(os.Stderr, "Usage: IfNilTest.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "       IfNilTest.native --source")
+		fmt.Fprintln(os.Stderr, "       IfNilTest.native --hash")
 		os.Exit(1)
 	}
 
@@ -56,7 +55,7 @@ func main() {
 		fmt.Println(_contentHash)
 		return
 	case "--info":
-		fmt.Printf("Class: Counter\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
+		fmt.Printf("Class: IfNilTest\nHash: %s\nSource length: %d bytes\n", _contentHash, len(_sourceCode))
 		return
 	case "--serve":
 		runServeMode()
@@ -64,7 +63,7 @@ func main() {
 	}
 
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: Counter.native <instance_id> <selector> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: IfNilTest.native <instance_id> <selector> [args...]")
 		os.Exit(1)
 	}
 
@@ -72,7 +71,7 @@ func main() {
 	selector := os.Args[2]
 	args := os.Args[3:]
 
-	if receiver == "Counter" || receiver == "Counter" {
+	if receiver == "IfNilTest" || receiver == "IfNilTest" {
 		result, err := dispatchClass(selector, args)
 		if err != nil {
 			if errors.Is(err, ErrUnknownSelector) {
@@ -134,20 +133,20 @@ func openDB() (*sql.DB, error) {
 	return sql.Open("sqlite3", dbPath)
 }
 
-func loadInstance(db *sql.DB, id string) (*Counter, error) {
+func loadInstance(db *sql.DB, id string) (*IfNilTest, error) {
 	var data string
 	err := db.QueryRow("SELECT data FROM instances WHERE id = ?", id).Scan(&data)
 	if err != nil {
 		return nil, err
 	}
-	var instance Counter
+	var instance IfNilTest
 	if err := json.Unmarshal([]byte(data), &instance); err != nil {
 		return nil, err
 	}
 	return &instance, nil
 }
 
-func saveInstance(db *sql.DB, id string, instance *Counter) error {
+func saveInstance(db *sql.DB, id string, instance *IfNilTest) error {
 	data, err := json.Marshal(instance)
 	if err != nil {
 		return err
@@ -161,7 +160,7 @@ func generateInstanceID(className string) string {
 	return strings.ToLower(className) + "_" + uuid
 }
 
-func createInstance(db *sql.DB, id string, instance *Counter) error {
+func createInstance(db *sql.DB, id string, instance *IfNilTest) error {
 	data, err := json.Marshal(instance)
 	if err != nil {
 		return err
@@ -243,7 +242,7 @@ func respond(resp ServeResponse) {
 }
 
 func handleServeRequest(db *sql.DB, req *ServeRequest) ServeResponse {
-	if req.Instance == "" || req.Instance == "Counter" || req.Instance == "Counter" {
+	if req.Instance == "" || req.Instance == "IfNilTest" || req.Instance == "IfNilTest" {
 		result, err := dispatchClass(req.Selector, req.Args)
 		if err != nil {
 			if errors.Is(err, ErrUnknownSelector) {
@@ -260,7 +259,7 @@ func handleServeRequest(db *sql.DB, req *ServeRequest) ServeResponse {
 		}
 	}
 
-	var instance Counter
+	var instance IfNilTest
 	if err := json.Unmarshal([]byte(req.Instance), &instance); err != nil {
 		return ServeResponse{
 			Error:    "invalid instance JSON: " + err.Error(),
@@ -743,40 +742,20 @@ func invokeBlock(blockID string, args ...interface{}) string {
 	return strings.TrimSpace(string(output))
 }
 
-func dispatch(c *Counter, instanceID string, selector string, args []string) (string, error) {
+func dispatch(c *IfNilTest, instanceID string, selector string, args []string) (string, error) {
 	switch selector {
 	case "class":
-		return "Counter", nil
+		return "IfNilTest", nil
 	case "id":
 		return instanceID, nil
 	case "delete":
 		return instanceID, nil
-	case "getValue":
-		return c.GetValue(), nil
-	case "getStep":
-		return c.GetStep(), nil
-	case "setValue_":
-		if len(args) < 1 {
-			return "", fmt.Errorf("setValue_ requires 1 argument")
-		}
-		return c.SetValue(args[0])
-	case "setStep_":
-		if len(args) < 1 {
-			return "", fmt.Errorf("setStep_ requires 1 argument")
-		}
-		return c.SetStep(args[0])
-	case "increment":
-		return c.Increment(), nil
-	case "decrement":
-		return c.Decrement(), nil
-	case "incrementBy_":
-		if len(args) < 1 {
-			return "", fmt.Errorf("incrementBy_ requires 1 argument")
-		}
-		return c.IncrementBy(args[0])
-	case "reset":
-		c.Reset()
-		return "", nil
+	case "testIfNilOnly":
+		return c.TestIfNilOnly(), nil
+	case "testIfNotNilOnly":
+		return c.TestIfNotNilOnly(), nil
+	case "testIfNilIfNotNil":
+		return c.TestIfNilIfNotNil(), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
@@ -785,12 +764,11 @@ func dispatch(c *Counter, instanceID string, selector string, args []string) (st
 func dispatchClass(selector string, args []string) (string, error) {
 	switch selector {
 	case "new":
-		id := generateInstanceID("Counter")
-		instance := &Counter{
-			Class:     "Counter",
+		id := generateInstanceID("IfNilTest")
+		instance := &IfNilTest{
+			Class:     "IfNilTest",
 			CreatedAt: time.Now().Format(time.RFC3339),
-			Step:      "1",
-			Value:     "0",
+			Value:     "",
 		}
 		db, err := openDB()
 		if err != nil {
@@ -801,56 +779,33 @@ func dispatchClass(selector string, args []string) (string, error) {
 			return "", err
 		}
 		return id, nil
-	case "description":
-		return Description(), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnknownSelector, selector)
 	}
 }
 
-func (c *Counter) GetValue() string {
-	return _toStr(toInt(c.Value) + toInt(0))
+func (c *IfNilTest) TestIfNilOnly() string {
+	var result interface{}
+	result = "default"
+	if c.Value == "" {
+		result = "was nil"
+	}
+	return _toStr(result)
 }
 
-func (c *Counter) GetStep() string {
-	return _toStr(toInt(c.Step) + toInt(0))
+func (c *IfNilTest) TestIfNotNilOnly() string {
+	var result interface{}
+	result = "was nil"
+	if c.Value != "" {
+		result = "has value"
+	}
+	return _toStr(result)
 }
 
-func (c *Counter) SetValue(val string) (string, error) {
-	c.Value = strconv.Itoa(toInt(val) + toInt(0))
-	return "", nil
-}
-
-func (c *Counter) SetStep(val string) (string, error) {
-	c.Step = strconv.Itoa(toInt(val) + toInt(0))
-	return "", nil
-}
-
-func (c *Counter) Increment() string {
-	var newVal interface{}
-	newVal = toInt(c.Value) + toInt(c.Step)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return _toStr(toInt(newVal) + toInt(0))
-}
-
-func (c *Counter) Decrement() string {
-	var newVal interface{}
-	newVal = toInt(c.Value) - toInt(c.Step)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return _toStr(toInt(newVal) + toInt(0))
-}
-
-func (c *Counter) IncrementBy(amount string) (string, error) {
-	var newVal interface{}
-	newVal = toInt(c.Value) + toInt(amount)
-	c.Value = strconv.Itoa(toInt(newVal) + toInt(0))
-	return "", nil
-}
-
-func (c *Counter) Reset() {
-	c.Value = strconv.Itoa(toInt(0) + toInt(0))
-}
-
-func Description() string {
-	return "\"A simple counter\""
+func (c *IfNilTest) TestIfNilIfNotNil() string {
+	if c.Value == "" {
+		return "nil case"
+	} else {
+		return "not nil case"
+	}
 }
