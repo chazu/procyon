@@ -36,11 +36,23 @@ func Generate(class *ast.Class) *Result {
 	}
 
 	// Build instance var lookup and track JSON-typed vars
+	// JSON vars use json.RawMessage type and need special handling for string conversion
 	for _, iv := range class.InstanceVars {
 		g.instanceVars[iv.Name] = true
-		// Check if default value is JSON object or array
+		// Check if default value is numeric - only numeric defaults use int type
+		// All other ivars use json.RawMessage (matching inferType logic)
 		defaultVal := iv.Default.Value
-		if len(defaultVal) > 0 && (defaultVal[0] == '{' || defaultVal[0] == '[') {
+		isNumeric := false
+		if len(defaultVal) > 0 {
+			isNumeric = true
+			for i, c := range defaultVal {
+				if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
+					isNumeric = false
+					break
+				}
+			}
+		}
+		if !isNumeric {
 			g.jsonVars[iv.Name] = true
 		}
 	}
@@ -187,15 +199,30 @@ func (g *generator) generateStruct(f *jen.File) {
 }
 
 func (g *generator) inferType(iv ast.InstanceVar) *jen.Statement {
-	// Check if default value is a JSON object or array
-	// These are stored as actual JSON in SQLite, not as strings
+	// Check if default value is numeric - these can safely use int type
 	defaultVal := iv.Default.Value
-	if len(defaultVal) > 0 && (defaultVal[0] == '{' || defaultVal[0] == '[') {
-		// Use json.RawMessage to handle JSON values that may be objects/arrays
-		return jen.Qual("encoding/json", "RawMessage")
+	if len(defaultVal) > 0 {
+		isNumeric := true
+		for i, c := range defaultVal {
+			if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
+				isNumeric = false
+				break
+			}
+		}
+		if isNumeric {
+			return jen.Int()
+		}
 	}
-	// For regular string values, use string type
-	return jen.String()
+
+	// For all other instance variables, use json.RawMessage.
+	// This safely handles values that could be:
+	// - Plain strings: stored as JSON strings ("hello")
+	// - JSON arrays: stored as ["x", "y"]
+	// - JSON objects: stored as {"key": "value"}
+	// - null values
+	// This is necessary because instance variable values in SQLite are stored
+	// as JSON, and at compile time we don't know what type of value will be set.
+	return jen.Qual("encoding/json", "RawMessage")
 }
 
 // isJSONArrayType checks if an instance variable has a JSON array type
@@ -1276,7 +1303,7 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 		_, isMessageSend := s.Value.(*parser.MessageSend)
 		_, isStringLit := s.Value.(*parser.StringLit)
 		jsonPrim, isJSONPrimitive := s.Value.(*parser.JSONPrimitiveExpr)
-		// Check if return value is an instance variable (all are string typed)
+		// Check if return value is an instance variable (generateExpr handles string conversion)
 		isIvarReturn := false
 		if id, ok := s.Value.(*parser.Identifier); ok {
 			isIvarReturn = g.instanceVars[id.Name]
