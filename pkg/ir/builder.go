@@ -95,6 +95,7 @@ func (b *Builder) Build() (*Program, []string, []string) {
 		QualifiedName: b.class.QualifiedName(),
 		Parent:        b.class.Parent,
 		Traits:        b.class.Traits,
+		ClassPragmas:  b.class.ClassPragmas,
 	}
 
 	// Handle parent package (if parent is qualified like Pkg::Parent)
@@ -152,10 +153,11 @@ func (b *Builder) buildMethod(m *ast.Method) Method {
 
 	// Create method
 	method := Method{
-		Selector:   m.Selector,
-		Kind:       kind,
-		IsRaw:      m.Raw,
-		CanCompile: !m.Raw, // Raw methods can't be compiled to Go
+		Selector:    m.Selector,
+		Kind:        kind,
+		IsRaw:       m.Raw,
+		IsPrimitive: m.Primitive,
+		CanCompile:  !m.Raw, // Raw methods can't be compiled to Go
 	}
 
 	// If raw method, mark it for Bash backend and capture raw body

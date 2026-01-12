@@ -16,7 +16,18 @@ type Program struct {
 	InstanceVars  []VarDecl
 	ClassVars     []VarDecl
 	Methods       []Method
-	SourceCode    string // Original source code for embedding
+	SourceCode    string   // Original source code for embedding
+	ClassPragmas  []string // Class-level pragmas (e.g., "primitiveClass")
+}
+
+// IsPrimitiveClass returns true if the program has the primitiveClass pragma.
+func (p *Program) IsPrimitiveClass() bool {
+	for _, pragma := range p.ClassPragmas {
+		if pragma == "primitiveClass" {
+			return true
+		}
+	}
+	return false
 }
 
 // VarDecl represents a variable declaration with resolved type
@@ -86,6 +97,7 @@ type Method struct {
 	CanCompile     bool    // Can be compiled to Go?
 	FallbackReason string  // Why it needs Bash fallback
 	IsRaw          bool    // Raw method (no transformation)
+	IsPrimitive    bool    // Primitive method (has native Procyon implementation)
 	RawBody        string  // For raw methods: the unprocessed Bash code
 }
 

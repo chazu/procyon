@@ -25,6 +25,7 @@ type Class struct {
 	Methods            []Method      `json:"methods"`
 	Aliases            []Alias       `json:"aliases"`
 	Advice             []Advice      `json:"advice"`
+	ClassPragmas       []string      `json:"classPragmas"` // Class-level pragmas (e.g., "primitiveClass")
 }
 
 // QualifiedName returns the fully qualified name of the class.
@@ -48,6 +49,21 @@ func (c *Class) CompiledName() string {
 // IsNamespaced returns true if the class belongs to a package.
 func (c *Class) IsNamespaced() bool {
 	return c.Package != ""
+}
+
+// HasClassPragma checks if the class has a specific pragma.
+func (c *Class) HasClassPragma(pragma string) bool {
+	for _, p := range c.ClassPragmas {
+		if p == pragma {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPrimitiveClass returns true if the class has the primitiveClass pragma.
+func (c *Class) IsPrimitiveClass() bool {
+	return c.HasClassPragma("primitiveClass")
 }
 
 // Location represents a position in the source file.

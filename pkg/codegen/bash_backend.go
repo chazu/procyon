@@ -33,6 +33,11 @@ func (b *BashBackend) Generate(prog *ir.Program) (string, error) {
 	b.buf.Reset()
 	b.indent = 0
 
+	// Validate primitiveClass pragma constraint
+	if err := b.validatePrimitiveClass(); err != nil {
+		return "", err
+	}
+
 	// Build instance var lookup
 	b.instanceVars = make(map[string]bool)
 	for _, iv := range prog.InstanceVars {
@@ -59,6 +64,29 @@ func (b *BashBackend) Generate(prog *ir.Program) (string, error) {
 	}
 
 	return b.buf.String(), nil
+}
+
+// validatePrimitiveClass checks that a class with pragma: primitiveClass
+// contains only primitive or raw methods.
+func (b *BashBackend) validatePrimitiveClass() error {
+	if !b.prog.IsPrimitiveClass() {
+		return nil
+	}
+
+	// Collect non-primitive methods
+	var nonPrimitive []string
+	for _, m := range b.prog.Methods {
+		if !m.IsPrimitive && !m.IsRaw {
+			nonPrimitive = append(nonPrimitive, m.Selector)
+		}
+	}
+
+	if len(nonPrimitive) > 0 {
+		return fmt.Errorf("class '%s' has pragma: primitiveClass but contains non-primitive methods:\n  %s\nAll methods in a primitiveClass must use primitiveMethod:, primitiveClassMethod:, rawMethod:, or rawClassMethod:",
+			b.prog.Name, strings.Join(nonPrimitive, ", "))
+	}
+
+	return nil
 }
 
 // generateHeader writes the file header
