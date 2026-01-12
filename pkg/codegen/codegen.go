@@ -1809,8 +1809,12 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 
 	case *parser.Identifier:
 		name := e.Name
-		// Check if it's self (the receiver) - only valid for instance methods
-		if name == "self" && !m.isClass {
+		// Check if it's self - in instance methods it's the receiver, in class methods it's the class name
+		if name == "self" {
+			if m.isClass {
+				// In class methods, self is the class name as a string
+				return jen.Lit(g.class.Name)
+			}
 			return jen.Id("c")
 		}
 		// Check if it's a method arg FIRST (params are strings, use as-is)
@@ -1864,22 +1868,36 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 				}
 			}
 
+			// Determine if target method is a class method
+			isTargetClassMethod := false
+			for _, method := range g.class.Methods {
+				if method.Selector == e.Selector && method.Kind == "class" {
+					isTargetClassMethod = true
+					break
+				}
+			}
+
 			if isTargetSkipped {
 				// Use sendMessage for skipped/raw methods that aren't compiled to Go
-				args := []jen.Code{jen.Id("c"), jen.Lit(e.Selector)}
+				var receiverArg jen.Code
+				if m.isClass {
+					// In class method, self is the class name
+					receiverArg = jen.Lit(g.class.Name)
+				} else {
+					receiverArg = jen.Id("c")
+				}
+				args := []jen.Code{receiverArg, jen.Lit(e.Selector)}
 				for _, arg := range e.Args {
 					args = append(args, g.generateExprAsString(arg, m))
 				}
 				return jen.Id("sendMessage").Call(args...)
 			}
 
-			// Self send to compiled method: direct Go method call
+			// Self send to compiled method
 			goMethodName := selectorToGoName(e.Selector)
-			if len(e.Args) == 0 {
-				return jen.Id("c").Dot(goMethodName).Call()
-			}
+
 			// Build args - Go methods take string params
-			args := []jen.Code{}
+			goArgs := []jen.Code{}
 			for _, arg := range e.Args {
 				// Check if the arg is a method parameter (already a string)
 				if ident, ok := arg.(*parser.Identifier); ok {
@@ -1892,7 +1910,7 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 					}
 					if isMethodArg {
 						// Use original string parameter directly
-						args = append(args, jen.Id(ident.Name))
+						goArgs = append(goArgs, jen.Id(ident.Name))
 						continue
 					}
 				}
@@ -1902,9 +1920,27 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 				if _, ok := arg.(*parser.NumberLit); ok {
 					argExpr = jen.Qual("strconv", "Itoa").Call(argExpr)
 				}
-				args = append(args, argExpr)
+				goArgs = append(goArgs, argExpr)
 			}
-			return jen.Id("c").Dot(goMethodName).Call(args...)
+
+			if isTargetClassMethod {
+				// Class method: direct function call (no receiver)
+				return jen.Id(goMethodName).Call(goArgs...)
+			}
+
+			// Instance method on self
+			if m.isClass {
+				// We're in a class method trying to call instance method on self
+				// This shouldn't normally happen, but fall back to sendMessage
+				args := []jen.Code{jen.Lit(g.class.Name), jen.Lit(e.Selector)}
+				for _, arg := range e.Args {
+					args = append(args, g.generateExprAsString(arg, m))
+				}
+				return jen.Id("sendMessage").Call(args...)
+			}
+
+			// Instance method call on receiver
+			return jen.Id("c").Dot(goMethodName).Call(goArgs...)
 		}
 
 		// Check for block invocation pattern: @ aBlock value / valueWith: / valueWith:and:

@@ -70,6 +70,12 @@ func main() {
 	}
 	class := unit.Class
 
+	// For plugin mode, skip primitive classes entirely (they contain raw bash)
+	if *mode == "plugin" && class.IsPrimitiveClass() {
+		// Output nothing - the Makefile checks for empty output and skips
+		os.Exit(0)
+	}
+
 	// Validate primitiveClass constraint (must check after trait methods are merged)
 	if err := class.ValidatePrimitiveClass(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
