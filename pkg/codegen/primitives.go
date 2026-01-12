@@ -73,7 +73,54 @@ var primitiveRegistry = map[string]map[string]bool{
 		"error_":  true,
 		"newline": true,
 	},
-	// More classes can be added here as we implement them
+	"Block": {
+		"params_code_captured_": true,
+		"value":                 true,
+		"valueWith_":            true,
+		"valueWith_and_":        true,
+		"numArgs":               true,
+	},
+	"FIFO": {
+		"at_":             true,
+		"create":          true,
+		"exists":          true,
+		"remove":          true,
+		"open":            true,
+		"close":           true,
+		"writeLine_":      true,
+		"readLine":        true,
+		"readLineTimeout_": true,
+		"startWriter_":    true,
+		"stopWriter":      true,
+		"startReader_":    true,
+		"stopReader":      true,
+		"_setPath_":       true,
+	},
+	"Future": {
+		"for_":     true,
+		"start":    true,
+		"await":    true,
+		"poll":     true,
+		"isDone":   true,
+		"cancel":   true,
+		"status":   true,
+		"exitCode": true,
+		"cleanup":  true,
+		"help":     true,
+	},
+	"Coproc": {
+		"for_":          true,
+		"startReadOnly": true,
+		"start":         true,
+		"readLine":      true,
+		"writeLine_":    true,
+		"isRunning":     true,
+		"terminate":     true,
+		"kill":          true,
+		"_cleanup":      true,
+		"_setCommand_":  true,
+		"_setStatus_":   true,
+	},
 }
 
 // hasPrimitiveImpl checks if a native implementation exists for a primitive method.
@@ -96,6 +143,14 @@ func (g *generator) generatePrimitiveMethod(f *jen.File, m *compiledMethod) bool
 		return g.generatePrimitiveMethodEnv(f, m)
 	case "Console":
 		return g.generatePrimitiveMethodConsole(f, m)
+	case "Block":
+		return g.generatePrimitiveMethodBlock(f, m)
+	case "FIFO":
+		return g.generatePrimitiveMethodFIFO(f, m)
+	case "Future":
+		return g.generatePrimitiveMethodFuture(f, m)
+	case "Coproc":
+		return g.generatePrimitiveMethodCoproc(f, m)
 	default:
 		return false
 	}
@@ -916,6 +971,439 @@ func (g *generator) generatePrimitiveMethodConsole(f *jen.File, m *compiledMetho
 		)
 		f.Line()
 		return true
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodBlock generates native Block class methods.
+// Block represents closures in Trashtalk. In native Go, these become actual Go closures.
+func (g *generator) generatePrimitiveMethodBlock(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "params_code_captured_":
+		// Factory: Create a Block with params, code, and captured variables
+		// In native Go, blocks are compiled inline as closures, so this is primarily
+		// for runtime compatibility. The code is stored as a string but would need
+		// an interpreter to execute dynamically.
+		f.Func().Id(m.goName).Params(
+			jen.Id("params").String(),
+			jen.Id("code").String(),
+			jen.Id("captured").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Generate instance ID"),
+			jen.Id("id").Op(":=").Lit("block_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.Comment("Create instance in database"),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("Block").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("Block"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Params"):    jen.Id("params"),
+				jen.Id("Code"):      jen.Id("code"),
+				jen.Id("Captured"):  jen.Id("captured"),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "numArgs":
+		// Return the number of parameters
+		f.Func().Parens(jen.Id("c").Op("*").Id("Block")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Parse params JSON array and return length"),
+			jen.Var().Id("params").Index().String(),
+			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(jen.Id("c").Dot("Params")),
+				jen.Op("&").Id("params"),
+			), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("0"), jen.Nil()),
+			),
+			jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Len(jen.Id("params"))), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "value", "valueWith_", "valueWith_and_":
+		// Block execution requires eval-like functionality which isn't available in native Go
+		// These would need to fall back to bash or use a different approach
+		// For now, return an error indicating dynamic execution isn't supported
+		return false
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodFIFO generates native FIFO (named pipe) class methods.
+func (g *generator) generatePrimitiveMethodFIFO(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "at_":
+		// Factory: Create a FIFO instance for a given path
+		f.Func().Id(m.goName).Params(jen.Id("path").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("id").Op(":=").Lit("fifo_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("FIFO").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("FIFO"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Path"):      jen.Id("path"),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "create":
+		// Create the named pipe on disk
+		f.Func().Parens(jen.Id("c").Op("*").Id("FIFO")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Qual("os", "Remove").Call(jen.Id("c").Dot("Path")),
+			jen.Err().Op(":=").Qual("syscall", "Mkfifo").Call(jen.Id("c").Dot("Path"), jen.Lit(0644)),
+			jen.Return(jen.Lit(""), jen.Err()),
+		)
+		f.Line()
+		return true
+
+	case "exists":
+		// Check if the pipe exists
+		f.Func().Parens(jen.Id("c").Op("*").Id("FIFO")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(jen.Id("c").Dot("Path")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.If(jen.Id("info").Dot("Mode").Call().Op("&").Qual("os", "ModeNamedPipe").Op("!=").Lit(0)).Block(
+				jen.Return(jen.Lit("true"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("false"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "remove":
+		// Remove the pipe from disk
+		f.Func().Parens(jen.Id("c").Op("*").Id("FIFO")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Qual("os", "Remove").Call(jen.Id("c").Dot("Path")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "writeLine_":
+		// Write a line to the FIFO
+		f.Func().Parens(jen.Id("c").Op("*").Id("FIFO")).Id(m.goName).Params(
+			jen.Id("text").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("file"), jen.Err()).Op(":=").Qual("os", "OpenFile").Call(
+				jen.Id("c").Dot("Path"),
+				jen.Qual("os", "O_WRONLY"),
+				jen.Lit(0),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("file").Dot("Close").Call(),
+			jen.List(jen.Id("_"), jen.Err()).Op("=").Id("file").Dot("WriteString").Call(jen.Id("text").Op("+").Lit("\n")),
+			jen.Return(jen.Lit(""), jen.Err()),
+		)
+		f.Line()
+		return true
+
+	case "readLine":
+		// Read a line from the FIFO
+		f.Func().Parens(jen.Id("c").Op("*").Id("FIFO")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("file"), jen.Err()).Op(":=").Qual("os", "Open").Call(jen.Id("c").Dot("Path")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("file").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("reader").Op(":=").Qual("bufio", "NewReader").Call(jen.Id("file")),
+			jen.List(jen.Id("line"), jen.Err()).Op(":=").Id("reader").Dot("ReadString").Call(jen.Lit('\n')),
+			jen.If(jen.Err().Op("!=").Nil().Op("&&").Err().Op("!=").Qual("io", "EOF")).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Qual("strings", "TrimSuffix").Call(jen.Id("line"), jen.Lit("\n")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "_setPath_":
+		// Private setter for path
+		f.Func().Parens(jen.Id("c").Op("*").Id("FIFO")).Id(m.goName).Params(
+			jen.Id("path").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("c").Dot("Path").Op("=").Id("path"),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "open", "close", "readLineTimeout_", "startWriter_", "stopWriter", "startReader_", "stopReader":
+		// These require background process management which is complex in native Go
+		// Fall back to bash for now
+		return false
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodFuture generates native Future class methods.
+func (g *generator) generatePrimitiveMethodFuture(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "for_":
+		// Factory: Create a Future for a command
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("id").Op(":=").Lit("future_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.Comment("Set up result file path"),
+			jen.Id("resultDir").Op(":=").Lit("/tmp/trashtalk/futures"),
+			jen.Qual("os", "MkdirAll").Call(jen.Id("resultDir"), jen.Lit(0755)),
+			jen.Id("resultFile").Op(":=").Id("resultDir").Op("+").Lit("/").Op("+").Id("id"),
+			jen.Line(),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("Future").Values(jen.Dict{
+				jen.Id("Class"):      jen.Lit("Future"),
+				jen.Id("CreatedAt"):  jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Command"):    jen.Id("command"),
+				jen.Id("ResultFile"): jen.Id("resultFile"),
+				jen.Id("Status"):     jen.Lit("created"),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "status":
+		// Get current status
+		f.Func().Parens(jen.Id("c").Op("*").Id("Future")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("c").Dot("Status"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "exitCode":
+		// Get exit code
+		f.Func().Parens(jen.Id("c").Op("*").Id("Future")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("c").Dot("ExitCode"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "cleanup":
+		// Clean up result files
+		f.Func().Parens(jen.Id("c").Op("*").Id("Future")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Qual("os", "Remove").Call(jen.Id("c").Dot("ResultFile")),
+			jen.Qual("os", "Remove").Call(jen.Id("c").Dot("ResultFile").Op("+").Lit(".exit")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "help":
+		// Show help text
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("help").Op(":=").Lit("=== Future - Async Computation ===\n\nUsage:\n  future := @ Future for: 'command'\n  @ future start\n  result := @ future await\n"),
+			jen.Return(jen.Id("help"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "start", "await", "poll", "isDone", "cancel":
+		// These require process management with os/exec
+		// Complex to implement correctly - fall back to bash
+		return false
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodCoproc generates native Coproc class methods.
+func (g *generator) generatePrimitiveMethodCoproc(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "for_":
+		// Factory: Create a Coproc for a command
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("id").Op(":=").Lit("coproc_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("Coproc").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("Coproc"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Command"):   jen.Id("command"),
+				jen.Id("Status"):    jen.Lit("created"),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "isRunning":
+		// Check if process is running using stored PID
+		f.Func().Parens(jen.Id("c").Op("*").Id("Coproc")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.If(jen.Id("c").Dot("Pid").Op("==").Lit("")).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.Line(),
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("c").Dot("Pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.Line(),
+			jen.List(jen.Id("process"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.Line(),
+			jen.Comment("On Unix, FindProcess always succeeds. Use Signal(0) to check."),
+			jen.Err().Op("=").Id("process").Dot("Signal").Call(jen.Qual("syscall", "Signal").Call(jen.Lit(0))),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("true"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "terminate":
+		// Send SIGTERM to the process
+		f.Func().Parens(jen.Id("c").Op("*").Id("Coproc")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.If(jen.Id("c").Dot("Pid").Op("==").Lit("")).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.Line(),
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("c").Dot("Pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Line(),
+			jen.List(jen.Id("process"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("process").Dot("Signal").Call(jen.Qual("syscall", "SIGTERM")),
+			jen.Id("c").Dot("Status").Op("=").Lit("terminated"),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "kill":
+		// Send SIGKILL to the process
+		f.Func().Parens(jen.Id("c").Op("*").Id("Coproc")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.If(jen.Id("c").Dot("Pid").Op("==").Lit("")).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.Line(),
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("c").Dot("Pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Line(),
+			jen.List(jen.Id("process"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("process").Dot("Kill").Call(),
+			jen.Id("c").Dot("Status").Op("=").Lit("killed"),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "_setCommand_":
+		f.Func().Parens(jen.Id("c").Op("*").Id("Coproc")).Id(m.goName).Params(
+			jen.Id("cmd").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("c").Dot("Command").Op("=").Id("cmd"),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "_setStatus_":
+		f.Func().Parens(jen.Id("c").Op("*").Id("Coproc")).Id(m.goName).Params(
+			jen.Id("status").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("c").Dot("Status").Op("=").Id("status"),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "_cleanup":
+		// Clean up FIFOs
+		f.Func().Parens(jen.Id("c").Op("*").Id("Coproc")).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.If(jen.Id("c").Dot("FifoIn").Op("!=").Lit("")).Block(
+				jen.Qual("os", "Remove").Call(jen.Id("c").Dot("FifoIn")),
+			),
+			jen.If(jen.Id("c").Dot("FifoOut").Op("!=").Lit("")).Block(
+				jen.Qual("os", "Remove").Call(jen.Id("c").Dot("FifoOut")),
+			),
+			jen.Id("c").Dot("FifoIn").Op("=").Lit(""),
+			jen.Id("c").Dot("FifoOut").Op("=").Lit(""),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "startReadOnly", "start", "readLine", "writeLine_", "readLinesDo_":
+		// These require complex process management with exec.Cmd and pipes
+		// Fall back to bash for now
+		return false
 
 	default:
 		return false
