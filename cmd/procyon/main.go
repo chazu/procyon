@@ -70,6 +70,12 @@ func main() {
 	}
 	class := unit.Class
 
+	// Validate primitiveClass constraint (must check after trait methods are merged)
+	if err := class.ValidatePrimitiveClass(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Generate code based on mode
 	var result *codegen.Result
 	switch *mode {

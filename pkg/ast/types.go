@@ -1,6 +1,11 @@
 // Package ast defines types for the Trashtalk AST produced by the jq parser.
 package ast
 
+import (
+	"fmt"
+	"strings"
+)
+
 // CompilationUnit represents a class along with its included traits.
 // This is the preferred input format when traits need to be compiled in.
 type CompilationUnit struct {
@@ -64,6 +69,36 @@ func (c *Class) HasClassPragma(pragma string) bool {
 // IsPrimitiveClass returns true if the class has the primitiveClass pragma.
 func (c *Class) IsPrimitiveClass() bool {
 	return c.HasClassPragma("primitiveClass")
+}
+
+// ValidatePrimitiveClass checks that a class with pragma: primitiveClass
+// contains only primitive or raw methods and does not include traits.
+// Returns nil if valid, error otherwise.
+func (c *Class) ValidatePrimitiveClass() error {
+	if !c.IsPrimitiveClass() {
+		return nil
+	}
+
+	// Primitive classes cannot include traits
+	if len(c.Traits) > 0 {
+		return fmt.Errorf("class '%s' has pragma: primitiveClass but includes traits: %s\nPrimitive classes cannot include traits.",
+			c.Name, strings.Join(c.Traits, ", "))
+	}
+
+	// Check all methods are primitive or raw
+	var nonPrimitive []string
+	for _, m := range c.Methods {
+		if !m.Primitive && !m.Raw {
+			nonPrimitive = append(nonPrimitive, m.Selector)
+		}
+	}
+
+	if len(nonPrimitive) > 0 {
+		return fmt.Errorf("class '%s' has pragma: primitiveClass but contains non-primitive methods:\n  %s\nAll methods in a primitiveClass must use primitiveMethod:, primitiveClassMethod:, rawMethod:, or rawClassMethod:",
+			c.Name, strings.Join(nonPrimitive, ", "))
+	}
+
+	return nil
 }
 
 // Location represents a position in the source file.
