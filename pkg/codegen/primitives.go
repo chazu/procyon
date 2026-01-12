@@ -154,6 +154,75 @@ var primitiveRegistry = map[string]map[string]bool{
 		"trimLeft_":  true,
 		"trimRight_": true,
 	},
+	"Shell": {
+		// Simple execution
+		"exec_":     true,
+		"run_":      true,
+		"silent_":   true,
+		"exitCode_": true,
+		"succeeds_": true,
+		"fails_":    true,
+		// Output capture
+		"execAll_":  true,
+		"execErr_":  true,
+		"execFull_": true,
+		// Background execution
+		"spawn_":                   true,
+		"spawn_outputTo_":          true,
+		"spawn_stdoutTo_stderrTo_": true,
+		"wait_":                    true,
+		// Process control
+		"isAlive_":     true,
+		"signal_to_":   true,
+		"terminate_":   true,
+		"kill_":        true,
+		"pause_":       true,
+		"resume_":      true,
+		// Piping and chaining
+		"exec_pipeTo_":        true,
+		"exec_pipeTo_pipeTo_": true,
+		// Input/Output
+		"exec_withInput_":     true,
+		"exec_withInputFrom_": true,
+		"exec_outputTo_":      true,
+		"exec_appendTo_":      true,
+		// Conditional execution
+		"if_then_":       true,
+		"unless_then_":   true,
+		"exec_timeout_":  true,
+		// Current shell state
+		"pid":          true,
+		"ppid":         true,
+		"lastExitCode": true,
+	},
+	"Array": {
+		"withValues_": true,
+	},
+	"Dictionary": {
+		"keys":       true,
+		"values":     true,
+		"withPairs_": true,
+		"do_":        true,
+		"keysDo_":    true,
+		"valuesDo_":  true,
+		"collect_":   true,
+		"select_":    true,
+		"merge_":     true,
+		"asJson":     true,
+	},
+	"Object": {
+		"printString":  true,
+		"class":        true,
+		"id":           true,
+		"isKindOf_":    true,
+		"conformsTo_":  true,
+		"inspect":      true,
+		"edit":         true,
+	},
+	"Protocol": {
+		"requiredMethods": true,
+		"isSatisfiedBy_":  true,
+	},
 }
 
 // hasPrimitiveImpl checks if a native implementation exists for a primitive method.
@@ -186,6 +255,16 @@ func (g *generator) generatePrimitiveMethod(f *jen.File, m *compiledMethod) bool
 		return g.generatePrimitiveMethodCoproc(f, m)
 	case "String":
 		return g.generatePrimitiveMethodString(f, m)
+	case "Shell":
+		return g.generatePrimitiveMethodShell(f, m)
+	case "Array":
+		return g.generatePrimitiveMethodArray(f, m)
+	case "Dictionary":
+		return g.generatePrimitiveMethodDictionary(f, m)
+	case "Object":
+		return g.generatePrimitiveMethodObject(f, m)
+	case "Protocol":
+		return g.generatePrimitiveMethodProtocol(f, m)
 	default:
 		return false
 	}
@@ -1743,6 +1822,787 @@ func (g *generator) generatePrimitiveMethodString(f *jen.File, m *compiledMethod
 		)
 		f.Line()
 		return true
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodShell generates native Shell class methods.
+// Shell provides command execution primitives - all methods are class methods.
+func (g *generator) generatePrimitiveMethodShell(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	// Simple execution
+	case "exec_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.List(jen.Id("output"), jen.Err()).Op(":=").Id("cmd").Dot("Output").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Comment("Return output even on error (non-zero exit)"),
+				jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+			),
+			jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "run_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+			jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "silent_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Id("_").Op("=").Id("cmd").Dot("Run").Call(),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "exitCode_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Err().Op(":=").Id("cmd").Dot("Run").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.If(
+					jen.List(jen.Id("exitErr"), jen.Id("ok")).Op(":=").Err().Dot("").Parens(jen.Op("*").Qual("os/exec", "ExitError")),
+					jen.Id("ok"),
+				).Block(
+					jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Id("exitErr").Dot("ExitCode").Call()), jen.Nil()),
+				),
+				jen.Return(jen.Lit("1"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("0"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "succeeds_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Err().Op(":=").Id("cmd").Dot("Run").Call(),
+			jen.If(jen.Err().Op("==").Nil()).Block(
+				jen.Return(jen.Lit("true"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("false"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "fails_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Err().Op(":=").Id("cmd").Dot("Run").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("true"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("false"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	// Output capture
+	case "execAll_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("CombinedOutput").Call(),
+			jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "execErr_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Var().Id("stderr").Qual("bytes", "Buffer"),
+			jen.Id("cmd").Dot("Stderr").Op("=").Op("&").Id("stderr"),
+			jen.Id("_").Op("=").Id("cmd").Dot("Run").Call(),
+			jen.Return(jen.Id("stderr").Dot("String").Call(), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "execFull_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Var().Id("stdout").Qual("bytes", "Buffer"),
+			jen.Var().Id("stderr").Qual("bytes", "Buffer"),
+			jen.Id("cmd").Dot("Stdout").Op("=").Op("&").Id("stdout"),
+			jen.Id("cmd").Dot("Stderr").Op("=").Op("&").Id("stderr"),
+			jen.Err().Op(":=").Id("cmd").Dot("Run").Call(),
+			jen.Id("exitCode").Op(":=").Lit(0),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.If(
+					jen.List(jen.Id("exitErr"), jen.Id("ok")).Op(":=").Err().Dot("").Parens(jen.Op("*").Qual("os/exec", "ExitError")),
+					jen.Id("ok"),
+				).Block(
+					jen.Id("exitCode").Op("=").Id("exitErr").Dot("ExitCode").Call(),
+				).Else().Block(
+					jen.Id("exitCode").Op("=").Lit(1),
+				),
+			),
+			jen.Comment("Return JSON object with stdout, stderr, exitCode"),
+			jen.Id("result").Op(":=").Qual("fmt", "Sprintf").Call(
+				jen.Lit(`{"stdout":%q,"stderr":%q,"exitCode":%d}`),
+				jen.Id("stdout").Dot("String").Call(),
+				jen.Id("stderr").Dot("String").Call(),
+				jen.Id("exitCode"),
+			),
+			jen.Return(jen.Id("result"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	// Background execution
+	case "spawn_":
+		f.Func().Id(m.goName).Params(jen.Id("command").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.If(jen.Err().Op(":=").Id("cmd").Dot("Start").Call(), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Id("cmd").Dot("Process").Dot("Pid")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "spawn_outputTo_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("filepath").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("outFile"), jen.Err()).Op(":=").Qual("os", "Create").Call(jen.Id("filepath")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Id("cmd").Dot("Stdout").Op("=").Id("outFile"),
+			jen.Id("cmd").Dot("Stderr").Op("=").Id("outFile"),
+			jen.If(jen.Err().Op(":=").Id("cmd").Dot("Start").Call(), jen.Err().Op("!=").Nil()).Block(
+				jen.Id("outFile").Dot("Close").Call(),
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Comment("Close file when process exits (in goroutine)"),
+			jen.Go().Func().Params().Block(
+				jen.Id("cmd").Dot("Wait").Call(),
+				jen.Id("outFile").Dot("Close").Call(),
+			).Call(),
+			jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Id("cmd").Dot("Process").Dot("Pid")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "spawn_stdoutTo_stderrTo_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("stdoutPath").String(),
+			jen.Id("stderrPath").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("stdoutFile"), jen.Err()).Op(":=").Qual("os", "Create").Call(jen.Id("stdoutPath")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.List(jen.Id("stderrFile"), jen.Err()).Op(":=").Qual("os", "Create").Call(jen.Id("stderrPath")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Id("stdoutFile").Dot("Close").Call(),
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Id("cmd").Dot("Stdout").Op("=").Id("stdoutFile"),
+			jen.Id("cmd").Dot("Stderr").Op("=").Id("stderrFile"),
+			jen.If(jen.Err().Op(":=").Id("cmd").Dot("Start").Call(), jen.Err().Op("!=").Nil()).Block(
+				jen.Id("stdoutFile").Dot("Close").Call(),
+				jen.Id("stderrFile").Dot("Close").Call(),
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Comment("Close files when process exits (in goroutine)"),
+			jen.Go().Func().Params().Block(
+				jen.Id("cmd").Dot("Wait").Call(),
+				jen.Id("stdoutFile").Dot("Close").Call(),
+				jen.Id("stderrFile").Dot("Close").Call(),
+			).Call(),
+			jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Id("cmd").Dot("Process").Dot("Pid")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "wait_":
+		f.Func().Id(m.goName).Params(jen.Id("pidStr").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("pidStr")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("1"), jen.Err()),
+			),
+			jen.List(jen.Id("proc"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("1"), jen.Nil()),
+			),
+			jen.List(jen.Id("state"), jen.Id("_")).Op(":=").Id("proc").Dot("Wait").Call(),
+			jen.If(jen.Id("state").Op("!=").Nil()).Block(
+				jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Id("state").Dot("ExitCode").Call()), jen.Nil()),
+			),
+			jen.Return(jen.Lit("0"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	// Process control
+	case "isAlive_":
+		f.Func().Id(m.goName).Params(jen.Id("pidStr").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("pidStr")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.List(jen.Id("proc"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.Comment("On Unix, FindProcess always succeeds - use Signal(0) to check"),
+			jen.Err().Op("=").Id("proc").Dot("Signal").Call(jen.Qual("syscall", "Signal").Call(jen.Lit(0))),
+			jen.If(jen.Err().Op("==").Nil()).Block(
+				jen.Return(jen.Lit("true"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("false"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "signal_to_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("signalName").String(),
+			jen.Id("pidStr").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("pidStr")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.List(jen.Id("proc"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Comment("Map signal name to signal"),
+			jen.Var().Id("sig").Qual("os", "Signal"),
+			jen.Switch(jen.Id("signalName")).Block(
+				jen.Case(jen.Lit("TERM"), jen.Lit("SIGTERM")).Block(
+					jen.Id("sig").Op("=").Qual("syscall", "SIGTERM"),
+				),
+				jen.Case(jen.Lit("KILL"), jen.Lit("SIGKILL")).Block(
+					jen.Id("sig").Op("=").Qual("syscall", "SIGKILL"),
+				),
+				jen.Case(jen.Lit("STOP"), jen.Lit("SIGSTOP")).Block(
+					jen.Id("sig").Op("=").Qual("syscall", "SIGSTOP"),
+				),
+				jen.Case(jen.Lit("CONT"), jen.Lit("SIGCONT")).Block(
+					jen.Id("sig").Op("=").Qual("syscall", "SIGCONT"),
+				),
+				jen.Case(jen.Lit("INT"), jen.Lit("SIGINT")).Block(
+					jen.Id("sig").Op("=").Qual("syscall", "SIGINT"),
+				),
+				jen.Case(jen.Lit("HUP"), jen.Lit("SIGHUP")).Block(
+					jen.Id("sig").Op("=").Qual("syscall", "SIGHUP"),
+				),
+				jen.Default().Block(
+					jen.Id("sig").Op("=").Qual("syscall", "SIGTERM"),
+				),
+			),
+			jen.Id("proc").Dot("Signal").Call(jen.Id("sig")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "terminate_":
+		f.Func().Id(m.goName).Params(jen.Id("pidStr").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("pidStr")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.List(jen.Id("proc"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.Id("proc").Dot("Signal").Call(jen.Qual("syscall", "SIGTERM")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "kill_":
+		f.Func().Id(m.goName).Params(jen.Id("pidStr").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("pidStr")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.List(jen.Id("proc"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.Id("proc").Dot("Kill").Call(),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "pause_":
+		f.Func().Id(m.goName).Params(jen.Id("pidStr").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("pidStr")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.List(jen.Id("proc"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.Id("proc").Dot("Signal").Call(jen.Qual("syscall", "SIGSTOP")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "resume_":
+		f.Func().Id(m.goName).Params(jen.Id("pidStr").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("pid"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("pidStr")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.List(jen.Id("proc"), jen.Err()).Op(":=").Qual("os", "FindProcess").Call(jen.Id("pid")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()),
+			),
+			jen.Id("proc").Dot("Signal").Call(jen.Qual("syscall", "SIGCONT")),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	// Piping and chaining
+	case "exec_pipeTo_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("pipeCommand").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Execute first command and pipe to second"),
+			jen.Id("fullCmd").Op(":=").Id("command").Op("+").Lit(" | ").Op("+").Id("pipeCommand"),
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("fullCmd")),
+			jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+			jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "exec_pipeTo_pipeTo_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("pipe1").String(),
+			jen.Id("pipe2").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("fullCmd").Op(":=").Id("command").Op("+").Lit(" | ").Op("+").Id("pipe1").Op("+").Lit(" | ").Op("+").Id("pipe2"),
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("fullCmd")),
+			jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+			jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	// Input/Output
+	case "exec_withInput_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("input").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Id("cmd").Dot("Stdin").Op("=").Qual("strings", "NewReader").Call(jen.Id("input")),
+			jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+			jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "exec_withInputFrom_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("filepath").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("inputFile"), jen.Err()).Op(":=").Qual("os", "Open").Call(jen.Id("filepath")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("inputFile").Dot("Close").Call(),
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Id("cmd").Dot("Stdin").Op("=").Id("inputFile"),
+			jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+			jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "exec_outputTo_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("filepath").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("outFile"), jen.Err()).Op(":=").Qual("os", "Create").Call(jen.Id("filepath")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("outFile").Dot("Close").Call(),
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Id("cmd").Dot("Stdout").Op("=").Id("outFile"),
+			jen.Id("_").Op("=").Id("cmd").Dot("Run").Call(),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "exec_appendTo_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("filepath").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("outFile"), jen.Err()).Op(":=").Qual("os", "OpenFile").Call(
+				jen.Id("filepath"),
+				jen.Qual("os", "O_APPEND").Op("|").Qual("os", "O_CREATE").Op("|").Qual("os", "O_WRONLY"),
+				jen.Lit(0644),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("outFile").Dot("Close").Call(),
+			jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.Id("cmd").Dot("Stdout").Op("=").Id("outFile"),
+			jen.Id("_").Op("=").Id("cmd").Dot("Run").Call(),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	// Conditional execution
+	case "if_then_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("condition").String(),
+			jen.Id("command").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("condCmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("condition")),
+			jen.If(jen.Err().Op(":=").Id("condCmd").Dot("Run").Call(), jen.Err().Op("==").Nil()).Block(
+				jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+				jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+				jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+			),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "unless_then_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("condition").String(),
+			jen.Id("command").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("condCmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("condition")),
+			jen.If(jen.Err().Op(":=").Id("condCmd").Dot("Run").Call(), jen.Err().Op("!=").Nil()).Block(
+				jen.Id("cmd").Op(":=").Qual("os/exec", "Command").Call(jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+				jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+				jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+			),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "exec_timeout_":
+		f.Func().Id(m.goName).Params(
+			jen.Id("command").String(),
+			jen.Id("secondsStr").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("seconds"), jen.Err()).Op(":=").Qual("strconv", "Atoi").Call(jen.Id("secondsStr")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.List(jen.Id("ctx"), jen.Id("cancel")).Op(":=").Qual("context", "WithTimeout").Call(
+				jen.Qual("context", "Background").Call(),
+				jen.Qual("time", "Duration").Call(jen.Id("seconds")).Op("*").Qual("time", "Second"),
+			),
+			jen.Defer().Id("cancel").Call(),
+			jen.Id("cmd").Op(":=").Qual("os/exec", "CommandContext").Call(jen.Id("ctx"), jen.Lit("bash"), jen.Lit("-c"), jen.Id("command")),
+			jen.List(jen.Id("output"), jen.Id("_")).Op(":=").Id("cmd").Dot("Output").Call(),
+			jen.Return(jen.String().Call(jen.Id("output")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	// Current shell state
+	case "pid":
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Qual("os", "Getpid").Call()), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "ppid":
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Qual("os", "Getppid").Call()), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "lastExitCode":
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("In native Go, we don't have a global last exit code - return 0"),
+			jen.Return(jen.Lit("0"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodArray generates native Array class methods.
+func (g *generator) generatePrimitiveMethodArray(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "withValues_":
+		// Initialize array with space-separated values
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("values").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Split values by whitespace and build JSON array"),
+			jen.Id("parts").Op(":=").Qual("strings", "Fields").Call(jen.Id("values")),
+			jen.Id("jsonArray").Op(":=").Make(jen.Index().Interface(), jen.Len(jen.Id("parts"))),
+			jen.For(jen.List(jen.Id("i"), jen.Id("v")).Op(":=").Range().Id("parts")).Block(
+				jen.Id("jsonArray").Index(jen.Id("i")).Op("=").Id("v"),
+			),
+			jen.List(jen.Id("data"), jen.Err()).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("jsonArray")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Comment("TODO: Set ivar 'items' on receiver to string(data)"),
+			jen.Id("_").Op("=").Id("data"),
+			jen.Return(jen.Id("receiver"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodDictionary generates native Dictionary class methods.
+func (g *generator) generatePrimitiveMethodDictionary(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "keys":
+		// Return keys of dictionary as newline-separated string
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("items").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Var().Id("data").Map(jen.String()).Interface(),
+			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(jen.Id("items")),
+				jen.Op("&").Id("data"),
+			), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("keys").Op(":=").Make(jen.Index().String(), jen.Lit(0), jen.Len(jen.Id("data"))),
+			jen.For(jen.Id("k").Op(":=").Range().Id("data")).Block(
+				jen.Id("keys").Op("=").Append(jen.Id("keys"), jen.Id("k")),
+			),
+			jen.Qual("sort", "Strings").Call(jen.Id("keys")),
+			jen.Return(jen.Qual("strings", "Join").Call(jen.Id("keys"), jen.Lit("\n")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "values":
+		// Return values of dictionary as newline-separated string
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("items").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Var().Id("data").Map(jen.String()).Interface(),
+			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(jen.Id("items")),
+				jen.Op("&").Id("data"),
+			), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("vals").Op(":=").Make(jen.Index().String(), jen.Lit(0), jen.Len(jen.Id("data"))),
+			jen.For(jen.List(jen.Id("_"), jen.Id("v")).Op(":=").Range().Id("data")).Block(
+				jen.Id("vals").Op("=").Append(jen.Id("vals"), jen.Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("v"))),
+			),
+			jen.Return(jen.Qual("strings", "Join").Call(jen.Id("vals"), jen.Lit("\n")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "asJson":
+		// Return compact JSON representation
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("items").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Compact JSON by parsing and re-marshaling"),
+			jen.Var().Id("data").Interface(),
+			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(jen.Id("items")),
+				jen.Op("&").Id("data"),
+			), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.List(jen.Id("compact"), jen.Err()).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("data")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.String().Parens(jen.Id("compact")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "withPairs_":
+		// Build dictionary from "key:value key2:value2" pairs
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("pairs").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("data").Op(":=").Make(jen.Map(jen.String()).String()),
+			jen.For(jen.List(jen.Id("_"), jen.Id("pair")).Op(":=").Range().Qual("strings", "Fields").Call(jen.Id("pairs"))).Block(
+				jen.Id("parts").Op(":=").Qual("strings", "SplitN").Call(jen.Id("pair"), jen.Lit(":"), jen.Lit(2)),
+				jen.If(jen.Len(jen.Id("parts")).Op("==").Lit(2)).Block(
+					jen.Id("data").Index(jen.Id("parts").Index(jen.Lit(0))).Op("=").Id("parts").Index(jen.Lit(1)),
+				),
+			),
+			jen.List(jen.Id("jsonBytes"), jen.Err()).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("data")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Comment("TODO: Set ivar 'items' on receiver to string(jsonBytes)"),
+			jen.Id("_").Op("=").Id("jsonBytes"),
+			jen.Return(jen.Id("receiver"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "merge_":
+		// Merge another dictionary into this one
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("items").String(),
+			jen.Id("otherJson").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Var().Id("data").Map(jen.String()).Interface(),
+			jen.Var().Id("other").Map(jen.String()).Interface(),
+			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(jen.Id("items")),
+				jen.Op("&").Id("data"),
+			), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+				jen.Index().Byte().Parens(jen.Id("otherJson")),
+				jen.Op("&").Id("other"),
+			), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.For(jen.List(jen.Id("k"), jen.Id("v")).Op(":=").Range().Id("other")).Block(
+				jen.Id("data").Index(jen.Id("k")).Op("=").Id("v"),
+			),
+			jen.List(jen.Id("merged"), jen.Err()).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("data")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Comment("TODO: Set ivar 'items' on receiver to string(merged)"),
+			jen.Id("_").Op("=").Id("merged"),
+			jen.Return(jen.Id("receiver"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "do_", "keysDo_", "valuesDo_", "collect_", "select_":
+		// Block iteration methods - complex, fall back to bash for now
+		return false
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodObject generates native Object class methods.
+func (g *generator) generatePrimitiveMethodObject(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "printString":
+		// Return "<ClassName instanceId>"
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("className").String(),
+			jen.Id("instanceId").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("<%s %s>"), jen.Id("className"), jen.Id("instanceId")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "class":
+		// Return the class name
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("className").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("className"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "id":
+		// Return the instance ID
+		f.Func().Id(m.goName).Params(
+			jen.Id("receiver").String(),
+			jen.Id("instanceId").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("instanceId"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "isKindOf_":
+		// Check class hierarchy - requires runtime support
+		// Fall back to bash for now
+		return false
+
+	case "conformsTo_":
+		// Check protocol conformance - requires runtime support
+		// Fall back to bash for now
+		return false
+
+	case "inspect":
+		// Detailed inspection - requires runtime data access
+		// Fall back to bash for now
+		return false
+
+	case "edit":
+		// Editor integration - requires file system and process control
+		// Fall back to bash for now
+		return false
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodProtocol generates native Protocol class methods.
+func (g *generator) generatePrimitiveMethodProtocol(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "requiredMethods":
+		// Requires runtime metadata access - fall back to bash
+		return false
+
+	case "isSatisfiedBy_":
+		// Requires runtime method introspection - fall back to bash
+		return false
 
 	default:
 		return false
