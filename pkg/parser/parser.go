@@ -1122,6 +1122,11 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		p.advance()
 		return &StringLit{Value: tok.Value}, nil
 
+	case ast.TokenTripleString:
+		// Triple-quoted strings - value is already stripped of quotes
+		p.advance()
+		return &StringLit{Value: tok.Value}, nil
+
 	case "STRING":
 		// STRING tokens from other sources may still have quotes
 		p.advance()
@@ -1297,6 +1302,11 @@ func (p *Parser) parseMessageArg() (Expr, error) {
 
 	case ast.TokenDString, ast.TokenSString:
 		// jq-compiler already strips quotes from SSTRING/DSTRING values
+		p.advance()
+		return &StringLit{Value: tok.Value}, nil
+
+	case ast.TokenTripleString:
+		// Triple-quoted strings - value is already stripped of quotes
 		p.advance()
 		return &StringLit{Value: tok.Value}, nil
 
