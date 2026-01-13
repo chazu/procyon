@@ -140,6 +140,11 @@ type Runtime struct {
 	cache       map[string]*cacheEntry
 	cacheMu     sync.RWMutex
 	trashtalkRoot string // Path to ~/.trashtalk
+
+	// Block management for bytecode execution
+	blockRegistry   map[string]BlockInterface // blockID -> block implementation
+	blockRegistryMu sync.RWMutex
+	blockCounter    int // For generating unique block IDs
 }
 
 // Config holds runtime configuration options.
@@ -152,7 +157,8 @@ type Config struct {
 // If cfg is nil, defaults are used.
 func New(cfg *Config) (*Runtime, error) {
 	r := &Runtime{
-		cache: make(map[string]*cacheEntry),
+		cache:         make(map[string]*cacheEntry),
+		blockRegistry: make(map[string]BlockInterface),
 	}
 
 	// Determine trashtalk root
@@ -455,4 +461,94 @@ func (r *Runtime) IsCached(id string) bool {
 	defer r.cacheMu.RUnlock()
 	_, ok := r.cache[id]
 	return ok
+}
+
+// ============================================================================
+// Block Registry - for bytecode block management
+// ============================================================================
+
+// RegisterBlock registers a block implementation for later invocation.
+// Returns the assigned block ID.
+func (r *Runtime) RegisterBlock(block BlockInterface) string {
+	r.blockRegistryMu.Lock()
+	defer r.blockRegistryMu.Unlock()
+
+	r.blockCounter++
+	id := fmt.Sprintf("block_%d", r.blockCounter)
+	r.blockRegistry[id] = block
+	return id
+}
+
+// RegisterBlockWithID registers a block with a specific ID.
+// Useful for restoring serialized blocks or cross-process transfer.
+func (r *Runtime) RegisterBlockWithID(id string, block BlockInterface) {
+	r.blockRegistryMu.Lock()
+	defer r.blockRegistryMu.Unlock()
+	r.blockRegistry[id] = block
+}
+
+// GetBlock retrieves a registered block by ID.
+// Returns nil if the block is not registered.
+func (r *Runtime) GetBlock(id string) BlockInterface {
+	r.blockRegistryMu.RLock()
+	defer r.blockRegistryMu.RUnlock()
+	return r.blockRegistry[id]
+}
+
+// UnregisterBlock removes a block from the registry.
+func (r *Runtime) UnregisterBlock(id string) {
+	r.blockRegistryMu.Lock()
+	defer r.blockRegistryMu.Unlock()
+	delete(r.blockRegistry, id)
+}
+
+// InvokeBlock invokes a registered block with the given arguments.
+// Falls back to Bash execution for unregistered blocks.
+func (r *Runtime) InvokeBlock(id string, args ...string) (string, error) {
+	r.blockRegistryMu.RLock()
+	block, ok := r.blockRegistry[id]
+	r.blockRegistryMu.RUnlock()
+
+	if !ok {
+		// Fall back to Bash for unregistered blocks
+		return r.InvokeBashBlock(id, args...)
+	}
+
+	// Create execution context
+	ctx := &BlockContext{
+		Runtime:  r,
+		Captured: make(map[string]*CapturedVar),
+	}
+
+	return block.Invoke(ctx, args...)
+}
+
+// InvokeBlockWithContext invokes a block with an explicit context.
+// This allows passing captured variables and instance information.
+func (r *Runtime) InvokeBlockWithContext(id string, ctx *BlockContext, args ...string) (string, error) {
+	r.blockRegistryMu.RLock()
+	block, ok := r.blockRegistry[id]
+	r.blockRegistryMu.RUnlock()
+
+	if !ok {
+		// Fall back to Bash for unregistered blocks
+		return r.InvokeBashBlock(id, args...)
+	}
+
+	return block.Invoke(ctx, args...)
+}
+
+// BlockRegistryStats returns statistics about the block registry.
+func (r *Runtime) BlockRegistryStats() (count int) {
+	r.blockRegistryMu.RLock()
+	defer r.blockRegistryMu.RUnlock()
+	return len(r.blockRegistry)
+}
+
+// ClearBlockRegistry removes all blocks from the registry.
+func (r *Runtime) ClearBlockRegistry() {
+	r.blockRegistryMu.Lock()
+	defer r.blockRegistryMu.Unlock()
+	r.blockRegistry = make(map[string]BlockInterface)
+	r.blockCounter = 0
 }
