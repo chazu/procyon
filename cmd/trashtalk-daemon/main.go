@@ -12,6 +12,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -20,11 +21,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/chazu/procyon/pkg/bytecode"
 	"github.com/jamesits/goinvoke"
 )
 
@@ -47,6 +51,12 @@ type Request struct {
 	Instance string   `json:"instance"`
 	Selector string   `json:"selector"`
 	Args     []string `json:"args"`
+
+	// For bytecode block operations
+	BlockOp       string `json:"block_op,omitempty"`       // "register", "invoke", "serialize"
+	BlockID       string `json:"block_id,omitempty"`       // Block identifier
+	BlockData     string `json:"block_data,omitempty"`     // Hex-encoded bytecode or JSON args
+	BlockCaptures string `json:"block_captures,omitempty"` // JSON capture cell data
 }
 
 // Response is the JSON response to Bash
@@ -55,6 +65,16 @@ type Response struct {
 	Result   string `json:"result,omitempty"`
 	ExitCode int    `json:"exit_code"`
 	Error    string `json:"error,omitempty"`
+
+	// For bytecode block operations
+	BlockID   string `json:"block_id,omitempty"`
+	BlockData string `json:"block_data,omitempty"`
+}
+
+// RegisteredBlock holds a compiled block and its captures for invocation
+type RegisteredBlock struct {
+	Chunk    *bytecode.Chunk
+	Captures []*bytecode.CaptureCell
 }
 
 // Daemon manages plugin loading and dispatch
@@ -65,6 +85,12 @@ type Daemon struct {
 	idleTimeout time.Duration
 	idleTimer   *time.Timer
 	timerMu     sync.Mutex
+
+	// Bytecode block management
+	blockRegistry map[string]*RegisteredBlock
+	blockMu       sync.RWMutex
+	blockCounter  uint64
+	vm            *bytecode.VM
 }
 
 var (
@@ -85,9 +111,11 @@ func main() {
 	}
 
 	d := &Daemon{
-		plugins:     make(map[string]*Plugin),
-		pluginDir:   dir,
-		idleTimeout: time.Duration(*idleTimeout) * time.Second,
+		plugins:       make(map[string]*Plugin),
+		pluginDir:     dir,
+		idleTimeout:   time.Duration(*idleTimeout) * time.Second,
+		blockRegistry: make(map[string]*RegisteredBlock),
+		vm:            bytecode.NewVM(),
 	}
 
 	if *debug {
@@ -266,6 +294,11 @@ func (d *Daemon) respond(w interface{ Write([]byte) (int, error) }, resp Respons
 
 // HandleRequest processes a single dispatch request
 func (d *Daemon) HandleRequest(req Request) Response {
+	// Handle bytecode block operations
+	if req.BlockOp != "" {
+		return d.handleBlockOp(req)
+	}
+
 	// Load plugin on demand
 	plugin, err := d.LoadPlugin(req.Class)
 	if err != nil {
@@ -409,4 +442,165 @@ func gostring(p unsafe.Pointer) string {
 // free C.CString allocations from the plugin side.
 func freeStrings(ptrs ...unsafe.Pointer) {
 	// Go-allocated strings are managed by GC
+}
+
+// ============ Bytecode Block Operations ============
+
+// handleBlockOp processes bytecode block operations
+func (d *Daemon) handleBlockOp(req Request) Response {
+	switch req.BlockOp {
+	case "register":
+		return d.handleBlockRegister(req)
+	case "invoke":
+		return d.handleBlockInvoke(req)
+	case "serialize":
+		return d.handleBlockSerialize(req)
+	default:
+		return Response{ExitCode: 1, Error: "unknown block operation: " + req.BlockOp}
+	}
+}
+
+// handleBlockRegister registers a new bytecode block
+func (d *Daemon) handleBlockRegister(req Request) Response {
+	// Decode bytecode from hex
+	chunkData, err := hex.DecodeString(req.BlockData)
+	if err != nil {
+		return Response{ExitCode: 1, Error: "invalid bytecode hex: " + err.Error()}
+	}
+
+	// Deserialize the chunk
+	chunk, err := bytecode.Deserialize(chunkData)
+	if err != nil {
+		return Response{ExitCode: 1, Error: "failed to deserialize bytecode: " + err.Error()}
+	}
+
+	// Parse capture data if provided
+	var captures []*bytecode.CaptureCell
+	if req.BlockCaptures != "" {
+		var capData []struct {
+			Value      string `json:"value"`
+			Name       string `json:"name"`
+			Source     int    `json:"source"`
+			InstanceID string `json:"instance_id"`
+		}
+		if err := json.Unmarshal([]byte(req.BlockCaptures), &capData); err != nil {
+			return Response{ExitCode: 1, Error: "invalid captures JSON: " + err.Error()}
+		}
+		for _, cd := range capData {
+			captures = append(captures, &bytecode.CaptureCell{
+				Value:      cd.Value,
+				Name:       cd.Name,
+				Source:     bytecode.VarSource(cd.Source),
+				InstanceID: cd.InstanceID,
+			})
+		}
+	}
+
+	// Register the block
+	blockID := d.registerBlock(chunk, captures)
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: registered block %s (%d bytes, %d captures)\n",
+			blockID, len(chunkData), len(captures))
+	}
+
+	return Response{ExitCode: 0, BlockID: blockID}
+}
+
+// handleBlockInvoke invokes a registered bytecode block
+func (d *Daemon) handleBlockInvoke(req Request) Response {
+	// Parse arguments from BlockData
+	var args []string
+	if req.BlockData != "" {
+		if err := json.Unmarshal([]byte(req.BlockData), &args); err != nil {
+			return Response{ExitCode: 1, Error: "invalid args JSON: " + err.Error()}
+		}
+	}
+
+	// Get the block
+	d.blockMu.RLock()
+	block, ok := d.blockRegistry[req.BlockID]
+	d.blockMu.RUnlock()
+
+	if !ok {
+		// Check if this is a bytecode block prefix - if not, fall back to bash
+		if !strings.HasPrefix(req.BlockID, "bytecode_block_") {
+			return Response{ExitCode: 200} // Signal fallback to Bash
+		}
+		return Response{ExitCode: 1, Error: "block not found: " + req.BlockID}
+	}
+
+	// Execute the block
+	result, err := d.vm.ExecuteWithCaptures(block.Chunk, req.Instance, args, block.Captures)
+	if err != nil {
+		return Response{ExitCode: 1, Error: "block execution failed: " + err.Error()}
+	}
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: invoked block %s with %d args -> %q\n",
+			req.BlockID, len(args), result)
+	}
+
+	return Response{ExitCode: 0, Result: result}
+}
+
+// handleBlockSerialize exports a block for cross-process transfer
+func (d *Daemon) handleBlockSerialize(req Request) Response {
+	d.blockMu.RLock()
+	block, ok := d.blockRegistry[req.BlockID]
+	d.blockMu.RUnlock()
+
+	if !ok {
+		return Response{ExitCode: 1, Error: "block not found: " + req.BlockID}
+	}
+
+	// Serialize the chunk
+	data, err := block.Chunk.Serialize()
+	if err != nil {
+		return Response{ExitCode: 1, Error: "serialization failed: " + err.Error()}
+	}
+
+	// Serialize captures
+	var capData []struct {
+		Value      string `json:"value"`
+		Name       string `json:"name"`
+		Source     int    `json:"source"`
+		InstanceID string `json:"instance_id"`
+	}
+	for _, cap := range block.Captures {
+		capData = append(capData, struct {
+			Value      string `json:"value"`
+			Name       string `json:"name"`
+			Source     int    `json:"source"`
+			InstanceID string `json:"instance_id"`
+		}{
+			Value:      cap.Get(),
+			Name:       cap.Name,
+			Source:     int(cap.Source),
+			InstanceID: cap.InstanceID,
+		})
+	}
+	capturesJSON, _ := json.Marshal(capData)
+
+	return Response{
+		ExitCode:  0,
+		BlockData: hex.EncodeToString(data),
+		BlockID:   string(capturesJSON),
+	}
+}
+
+// registerBlock adds a block to the registry and returns its ID
+func (d *Daemon) registerBlock(chunk *bytecode.Chunk, captures []*bytecode.CaptureCell) string {
+	d.blockMu.Lock()
+	defer d.blockMu.Unlock()
+
+	id := atomic.AddUint64(&d.blockCounter, 1)
+	blockID := fmt.Sprintf("bytecode_block_%d", id)
+
+	d.blockRegistry[blockID] = &RegisteredBlock{
+		Chunk:    chunk,
+		Captures: captures,
+	}
+
+	return blockID
 }
