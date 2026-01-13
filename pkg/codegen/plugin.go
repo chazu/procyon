@@ -32,11 +32,23 @@ func GeneratePlugin(class *ast.Class) *Result {
 	}
 
 	// Build instance var lookup and track JSON-typed vars
+	// JSON vars use json.RawMessage type and need special handling for string conversion
 	for _, iv := range class.InstanceVars {
 		g.instanceVars[iv.Name] = true
-		// Check if default value is JSON object or array
+		// Check if default value is numeric - only numeric defaults use int type
+		// All other ivars use json.RawMessage (matching inferType logic)
 		defaultVal := iv.Default.Value
-		if len(defaultVal) > 0 && (defaultVal[0] == '{' || defaultVal[0] == '[') {
+		isNumeric := false
+		if len(defaultVal) > 0 {
+			isNumeric = true
+			for i, c := range defaultVal {
+				if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
+					isNumeric = false
+					break
+				}
+			}
+		}
+		if !isNumeric {
 			g.jsonVars[iv.Name] = true
 		}
 	}
