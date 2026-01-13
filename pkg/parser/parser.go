@@ -877,7 +877,8 @@ func (p *Parser) parseMulDiv() (Expr, error) {
 func isJSONPrimitiveUnary(name string) bool {
 	switch name {
 	case "arrayLength", "arrayFirst", "arrayLast", "arrayIsEmpty",
-		"objectKeys", "objectValues", "objectLength", "objectIsEmpty":
+		"objectKeys", "objectValues", "objectLength", "objectIsEmpty",
+		"stringToJsonArray":
 		return true
 	}
 	return false

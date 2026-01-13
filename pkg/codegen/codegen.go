@@ -1212,9 +1212,9 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 	switch s := stmt.(type) {
 	case *parser.Assignment:
 		target := s.Target
-		// Check if it's an instance variable (string typed)
+		// Check if it's an instance variable
 		if g.instanceVars[target] {
-			// For instance variables, we need string values
+			isNumericIvar := !g.jsonVars[target] // Numeric ivars are NOT in jsonVars
 			var expr *jen.Statement
 			switch v := s.Value.(type) {
 			case *parser.Identifier:
@@ -1232,34 +1232,81 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 					if renamed, ok := m.renamedVars[v.Name]; ok {
 						paramName = renamed
 					}
-					expr = jen.Id(paramName)
+					if isNumericIvar {
+						// Numeric ivar needs int conversion from string param
+						expr = jen.Id("toInt").Call(jen.Id(paramName))
+					} else {
+						expr = jen.Id(paramName)
+					}
 				} else if g.instanceVars[v.Name] {
-					// Assigning one ivar to another - already a string
-					expr = g.generateExpr(s.Value, m)
+					// Assigning one ivar to another
+					if isNumericIvar && !g.jsonVars[v.Name] {
+						// Both are numeric - direct assignment
+						expr = g.generateExpr(s.Value, m)
+					} else if isNumericIvar {
+						// Target is numeric, source is string - convert
+						expr = jen.Id("toInt").Call(g.generateExpr(s.Value, m))
+					} else {
+						// Target is string-typed
+						expr = g.generateExpr(s.Value, m)
+					}
 				} else {
-					// Local variable - need to convert to string
-					expr = jen.Id("_toStr").Call(g.generateExpr(s.Value, m))
+					// Local variable
+					if isNumericIvar {
+						// Need to convert interface{} to int
+						expr = jen.Id("toInt").Call(g.generateExpr(s.Value, m))
+					} else {
+						// Need to convert to string
+						expr = jen.Id("_toStr").Call(g.generateExpr(s.Value, m))
+					}
 				}
 			case *parser.BinaryExpr:
 				if v.Op == "," {
 					// String concatenation - already returns string
-					expr = g.generateExpr(s.Value, m)
+					if isNumericIvar {
+						// Can't assign string to numeric - shouldn't happen
+						expr = jen.Id("toInt").Call(g.generateExpr(s.Value, m))
+					} else {
+						expr = g.generateExpr(s.Value, m)
+					}
 				} else {
-					// Arithmetic expression - result is int, need to convert to string
-					expr = jen.Qual("strconv", "Itoa").Call(g.generateExpr(s.Value, m))
+					// Arithmetic expression - result is int
+					if isNumericIvar {
+						// Numeric ivar - assign int directly
+						expr = g.generateExpr(s.Value, m)
+					} else {
+						// String ivar - convert int to string
+						expr = jen.Qual("strconv", "Itoa").Call(g.generateExpr(s.Value, m))
+					}
 				}
 			case *parser.StringLit:
-				// String literal - already a string
-				expr = g.generateExpr(s.Value, m)
+				// String literal
+				if isNumericIvar {
+					expr = jen.Id("toInt").Call(g.generateExpr(s.Value, m))
+				} else {
+					expr = g.generateExpr(s.Value, m)
+				}
 			case *parser.JSONPrimitiveExpr:
 				// JSON primitives return strings
-				expr = g.generateExpr(s.Value, m)
+				if isNumericIvar {
+					expr = jen.Id("toInt").Call(g.generateExpr(s.Value, m))
+				} else {
+					expr = g.generateExpr(s.Value, m)
+				}
 			case *parser.MessageSend:
 				// Message sends return strings
-				expr = g.generateExpr(s.Value, m)
+				if isNumericIvar {
+					expr = jen.Id("toInt").Call(g.generateExpr(s.Value, m))
+				} else {
+					expr = g.generateExpr(s.Value, m)
+				}
 			default:
-				// Default: wrap in _toStr for safety
-				expr = jen.Id("_toStr").Call(g.generateExpr(s.Value, m))
+				// Default
+				if isNumericIvar {
+					expr = jen.Id("toInt").Call(g.generateExpr(s.Value, m))
+				} else {
+					expr = jen.Id("_toStr").Call(g.generateExpr(s.Value, m))
+				}
 			}
 			// JSON vars need to be wrapped in json.RawMessage
 			if g.jsonVars[target] {
@@ -1426,9 +1473,29 @@ func (g *generator) generateWhileStatement(s *parser.WhileExpr, m *compiledMetho
 		bodyStmts = append(bodyStmts, g.generateStatement(stmt, m)...)
 	}
 
+	// In Trashtalk, truthy = non-empty string, falsy = empty string
+	// So we need to compare the condition result with "" in Go
+	// For comparison expressions (which return bool), use directly
+	// For message sends and other expressions (which return string), compare != ""
+	var goCondition *jen.Statement
+	switch s.Condition.(type) {
+	case *parser.BinaryExpr:
+		// Binary comparisons already return bool
+		be := s.Condition.(*parser.BinaryExpr)
+		if be.Op == "<" || be.Op == ">" || be.Op == "<=" || be.Op == ">=" || be.Op == "==" || be.Op == "!=" {
+			goCondition = condition
+		} else {
+			// Other binary ops (arithmetic, string concat) - compare result != ""
+			goCondition = condition.Clone().Op("!=").Lit("")
+		}
+	default:
+		// Message sends, identifiers, etc. return strings - compare != ""
+		goCondition = condition.Clone().Op("!=").Lit("")
+	}
+
 	// Go's "while" is just "for condition"
 	return []jen.Code{
-		jen.For(condition).Block(bodyStmts...),
+		jen.For(goCondition).Block(bodyStmts...),
 	}
 }
 
@@ -1513,11 +1580,11 @@ func (g *generator) generateIterationStatement(s *parser.IterationExpr, m *compi
 				jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Add(collectionExpr)).Block(loopBody...),
 			}
 		}
-		// JSON string: unmarshal first
+		// JSON string: unmarshal first (use _toStr to handle interface{})
 		return []jen.Code{
 			jen.Var().Id("_items").Index().Interface(),
 			jen.Qual("encoding/json", "Unmarshal").Call(
-				jen.Index().Byte().Parens(collectionExpr),
+				jen.Index().Byte().Parens(jen.Id("_toStr").Call(collectionExpr)),
 				jen.Op("&").Id("_items"),
 			),
 			jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Id("_items")).Block(loopBody...),
@@ -1538,11 +1605,11 @@ func (g *generator) generateIterationStatement(s *parser.IterationExpr, m *compi
 				jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Add(collectionExpr)).Block(loopBody...),
 			}
 		}
-		// JSON string: unmarshal first
+		// JSON string: unmarshal first (use _toStr to handle interface{})
 		return []jen.Code{
 			jen.Var().Id("_items").Index().Interface(),
 			jen.Qual("encoding/json", "Unmarshal").Call(
-				jen.Index().Byte().Parens(collectionExpr),
+				jen.Index().Byte().Parens(jen.Id("_toStr").Call(collectionExpr)),
 				jen.Op("&").Id("_items"),
 			),
 			jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0)),
@@ -1567,11 +1634,11 @@ func (g *generator) generateIterationStatement(s *parser.IterationExpr, m *compi
 				jen.For(jen.List(jen.Id("_"), jen.Id(rawIterVar)).Op(":=").Range().Add(collectionExpr)).Block(loopBody...),
 			}
 		}
-		// JSON string: unmarshal first
+		// JSON string: unmarshal first (use _toStr to handle interface{})
 		return []jen.Code{
 			jen.Var().Id("_items").Index().Interface(),
 			jen.Qual("encoding/json", "Unmarshal").Call(
-				jen.Index().Byte().Parens(collectionExpr),
+				jen.Index().Byte().Parens(jen.Id("_toStr").Call(collectionExpr)),
 				jen.Op("&").Id("_items"),
 			),
 			jen.Id("_results").Op(":=").Make(jen.Index().Interface(), jen.Lit(0)),
@@ -1913,6 +1980,9 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 						goArgs = append(goArgs, jen.Id(ident.Name))
 						continue
 					}
+					// Local variable - is interface{}, need to convert to string
+					goArgs = append(goArgs, jen.Id("_toStr").Call(jen.Id(ident.Name)))
+					continue
 				}
 				// For other args, generate and convert if needed
 				argExpr := g.generateExpr(arg, m)
@@ -2197,6 +2267,12 @@ func (g *generator) generateJSONPrimitive(e *parser.JSONPrimitiveExpr, m *compil
 			return jen.Id("_mapRemoveKey").Call(receiver, key)
 		}
 		return jen.Id("_jsonObjectRemoveKey").Call(receiver, key)
+
+	// String to array conversion
+	case "stringToJsonArray":
+		// Convert newline-separated text to JSON array
+		// receiver is the text string
+		return jen.Id("stringToJsonArray").Call(jen.Id("_toStr").Call(receiver))
 
 	default:
 		return jen.Comment("unknown JSON primitive: " + e.Operation)
@@ -2795,6 +2871,22 @@ func (g *generator) generateJSONHelpers(f *jen.File) {
 		),
 		jen.If(jen.Id("idx").Op(">=").Lit(0).Op("&&").Id("idx").Op("<").Len(jen.Id("arr"))).Block(
 			jen.Id("arr").Op("=").Append(jen.Id("arr").Index(jen.Op(":").Id("idx")), jen.Id("arr").Index(jen.Id("idx").Op("+").Lit(1).Op(":")).Op("...")),
+		),
+		jen.List(jen.Id("result"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("arr")),
+		jen.Return(jen.String().Parens(jen.Id("result"))),
+	)
+	f.Line()
+
+	// stringToJsonArray - convert newline-separated text to JSON array string
+	// Equivalent to: $(echo "$str" | jq -Rc '[., inputs]')
+	f.Func().Id("stringToJsonArray").Params(jen.Id("text").String()).String().Block(
+		jen.If(jen.Id("text").Op("==").Lit("")).Block(
+			jen.Return(jen.Lit("[]")),
+		),
+		jen.Id("lines").Op(":=").Qual("strings", "Split").Call(jen.Id("text"), jen.Lit("\n")),
+		jen.Id("arr").Op(":=").Make(jen.Index().Interface(), jen.Lit(0), jen.Len(jen.Id("lines"))),
+		jen.For(jen.List(jen.Id("_"), jen.Id("line")).Op(":=").Range().Id("lines")).Block(
+			jen.Id("arr").Op("=").Append(jen.Id("arr"), jen.Id("line")),
 		),
 		jen.List(jen.Id("result"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("arr")),
 		jen.Return(jen.String().Parens(jen.Id("result"))),
