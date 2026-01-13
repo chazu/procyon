@@ -3,10 +3,12 @@ package codegen
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
 	"github.com/chazu/procyon/pkg/ast"
+	"github.com/chazu/procyon/pkg/bytecode"
 	"github.com/chazu/procyon/pkg/parser"
 	"github.com/dave/jennifer/jen"
 )
@@ -33,6 +35,8 @@ func Generate(class *ast.Class) *Result {
 		instanceVars:   map[string]bool{},
 		jsonVars:       map[string]bool{},
 		skippedMethods: map[string]bool{},
+		compiledBlocks: map[string]*bytecode.Chunk{},
+		blockCounter:   0,
 	}
 
 	// Build instance var lookup and track JSON-typed vars
@@ -67,6 +71,10 @@ type generator struct {
 	instanceVars    map[string]bool
 	jsonVars        map[string]bool   // vars with JSON default values (use json.RawMessage)
 	skippedMethods  map[string]bool   // methods that will fall back to bash (for @ self detection)
+
+	// Bytecode compilation for blocks
+	compiledBlocks   map[string]*bytecode.Chunk // Block ID -> compiled bytecode
+	blockCounter     int                        // Counter for generating unique block IDs
 }
 
 type compiledMethod struct {
@@ -645,6 +653,91 @@ func (g *generator) generateTypeHelpers(f *jen.File) {
 		jen.Return(jen.Qual("strings", "TrimSpace").Call(jen.String().Parens(jen.Id("output")))),
 	)
 	f.Line()
+}
+
+// getLocalVars extracts local variable names from a compiled method
+func (g *generator) getLocalVars(m *compiledMethod) []string {
+	if m.body == nil {
+		return nil
+	}
+	return m.body.LocalVars
+}
+
+// getInstanceVarNames returns the names of all instance variables for the class
+func (g *generator) getInstanceVarNames() []string {
+	var names []string
+	for _, iv := range g.class.InstanceVars {
+		names = append(names, iv.Name)
+	}
+	return names
+}
+
+// compileBlockToBytecode converts a parser.BlockExpr to bytecode
+func (g *generator) compileBlockToBytecode(block *parser.BlockExpr, m *compiledMethod) (*bytecode.Chunk, error) {
+	ctx := &bytecode.CompilerContext{
+		MethodParams: m.args,
+		MethodLocals: g.getLocalVars(m),
+		InstanceVars: g.getInstanceVarNames(),
+		InstanceID:   "", // Will be filled at runtime
+	}
+
+	return bytecode.CompileBlock(block, ctx)
+}
+
+// generateBlockCreation generates Go code that creates and executes a bytecode block.
+// If bytecode compilation fails, it returns nil and callers should fall back to bash.
+func (g *generator) generateBlockCreation(block *parser.BlockExpr, m *compiledMethod) *jen.Statement {
+	chunk, err := g.compileBlockToBytecode(block, m)
+	if err != nil {
+		// Bytecode compilation failed - caller should fall back to bash
+		g.warnings = append(g.warnings, fmt.Sprintf("block compilation failed: %v", err))
+		return nil
+	}
+
+	// Serialize the chunk
+	chunkBytes, err := chunk.Serialize()
+	if err != nil {
+		g.warnings = append(g.warnings, fmt.Sprintf("chunk serialization failed: %v", err))
+		return nil
+	}
+
+	// Encode as hex string for embedding in Go source
+	chunkHex := hex.EncodeToString(chunkBytes)
+
+	// Store compiled block for potential reuse
+	blockID := fmt.Sprintf("block_%d", g.blockCounter)
+	g.blockCounter++
+	g.compiledBlocks[blockID] = chunk
+
+	// Generate a closure that deserializes and executes the bytecode
+	// The closure captures the hex-encoded bytecode and creates a VM to run it
+	// Note: We use ...interface{} for variadic args and convert to strings inside
+	return jen.Func().Params(
+		jen.Id("args").Op("...").Interface(),
+	).String().Block(
+		// Convert args to strings
+		jen.Id("strArgs").Op(":=").Make(jen.Index().String(), jen.Len(jen.Id("args"))),
+		jen.For(jen.List(jen.Id("i"), jen.Id("arg")).Op(":=").Range().Id("args")).Block(
+			jen.Id("strArgs").Index(jen.Id("i")).Op("=").Qual("fmt", "Sprint").Call(jen.Id("arg")),
+		),
+		// Decode the hex-encoded bytecode
+		jen.List(jen.Id("chunkData"), jen.Id("_")).Op(":=").Qual("encoding/hex", "DecodeString").Call(
+			jen.Lit(chunkHex),
+		),
+		// Deserialize to chunk
+		jen.List(jen.Id("chunk"), jen.Id("err")).Op(":=").Qual(
+			"github.com/chazu/procyon/pkg/bytecode", "Deserialize",
+		).Call(jen.Id("chunkData")),
+		jen.If(jen.Id("err").Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+		// Create VM and execute
+		jen.Id("vm").Op(":=").Qual(
+			"github.com/chazu/procyon/pkg/bytecode", "NewVM",
+		).Call(jen.Id("chunk"), jen.Nil(), jen.Nil()),
+		jen.List(jen.Id("result"), jen.Id("_")).Op(":=").Id("vm").Dot("Execute").Call(jen.Id("strArgs").Op("...")),
+		jen.Return(jen.Id("result")),
+	)
 }
 
 // generateServeMode generates the daemon loop that reads JSON from stdin
