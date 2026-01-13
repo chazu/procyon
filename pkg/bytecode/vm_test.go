@@ -1831,3 +1831,420 @@ func TestVMMissingCapture(t *testing.T) {
 		t.Errorf("Expected empty for missing capture, got %q", result)
 	}
 }
+
+// ============ Additional Coverage Tests ============
+
+// TestVMJSONObjectKeys tests the OBJECT_KEYS opcode
+func TestVMJSONObjectKeys(t *testing.T) {
+	chunk := NewChunk()
+	idx := chunk.AddConstant(`{"a":1,"b":2,"c":3}`)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	chunk.Emit(OpObjectKeys)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Result should be a JSON array of keys
+	if result != `["a","b","c"]` {
+		t.Errorf("Expected keys array, got %q", result)
+	}
+}
+
+// TestVMJSONObjectValues tests the OBJECT_VALUES opcode
+func TestVMJSONObjectValues(t *testing.T) {
+	chunk := NewChunk()
+	idx := chunk.AddConstant(`{"x":"hello","y":"world"}`)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	chunk.Emit(OpObjectValues)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Result should be a JSON array of values
+	if result != `["hello","world"]` {
+		t.Errorf("Expected values array, got %q", result)
+	}
+}
+
+// TestVMJSONObjectLen tests the OBJECT_LEN opcode
+func TestVMJSONObjectLen(t *testing.T) {
+	chunk := NewChunk()
+	idx := chunk.AddConstant(`{"a":1,"b":2,"c":3}`)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	chunk.Emit(OpObjectLen)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != "3" {
+		t.Errorf("Expected '3', got %q", result)
+	}
+}
+
+// TestVMJSONObjectRemove tests the OBJECT_REMOVE opcode
+func TestVMJSONObjectRemove(t *testing.T) {
+	chunk := NewChunk()
+	objIdx := chunk.AddConstant(`{"a":1,"b":2}`)
+	keyIdx := chunk.AddConstant("a")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(objIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(keyIdx)...)
+	chunk.Emit(OpObjectRemove)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != `{"b":2}` {
+		t.Errorf("Expected '{\"b\":2}', got %q", result)
+	}
+}
+
+// TestVMJSONArrayAtPut tests the ARRAY_AT_PUT opcode
+func TestVMJSONArrayAtPut(t *testing.T) {
+	chunk := NewChunk()
+	arrIdx := chunk.AddConstant(`["a","b","c"]`)
+	idxIdx := chunk.AddConstant("1")
+	valIdx := chunk.AddConstant("X")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(arrIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idxIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(valIdx)...)
+	chunk.Emit(OpArrayAtPut)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != `["a","X","c"]` {
+		t.Errorf("Expected '[\"a\",\"X\",\"c\"]', got %q", result)
+	}
+}
+
+// TestVMJSONArrayRemove tests the ARRAY_REMOVE opcode
+func TestVMJSONArrayRemove(t *testing.T) {
+	chunk := NewChunk()
+	arrIdx := chunk.AddConstant(`["a","b","c"]`)
+	idxIdx := chunk.AddConstant("1")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(arrIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idxIdx)...)
+	chunk.Emit(OpArrayRemove)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != `["a","c"]` {
+		t.Errorf("Expected '[\"a\",\"c\"]', got %q", result)
+	}
+}
+
+// TestVMJSONObjectEmptyKeys tests OBJECT_KEYS on empty object
+func TestVMJSONObjectEmptyKeys(t *testing.T) {
+	chunk := NewChunk()
+	idx := chunk.AddConstant(`{}`)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	chunk.Emit(OpObjectKeys)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != `[]` {
+		t.Errorf("Expected '[]', got %q", result)
+	}
+}
+
+// TestVMJSONObjectEmptyLen tests OBJECT_LEN on empty object
+func TestVMJSONObjectEmptyLen(t *testing.T) {
+	chunk := NewChunk()
+	idx := chunk.AddConstant(`{}`)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	chunk.Emit(OpObjectLen)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != "0" {
+		t.Errorf("Expected '0', got %q", result)
+	}
+}
+
+// TestVMJSONArrayAtPutOutOfBounds tests ARRAY_AT_PUT with out of bounds index
+func TestVMJSONArrayAtPutOutOfBounds(t *testing.T) {
+	chunk := NewChunk()
+	arrIdx := chunk.AddConstant(`["a"]`)
+	idxIdx := chunk.AddConstant("10") // Out of bounds
+	valIdx := chunk.AddConstant("X")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(arrIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idxIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(valIdx)...)
+	chunk.Emit(OpArrayAtPut)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Should return original array for out of bounds
+	if result != `["a"]` {
+		t.Errorf("Expected original array, got %q", result)
+	}
+}
+
+// TestVMJSONArrayRemoveOutOfBounds tests ARRAY_REMOVE with out of bounds index
+func TestVMJSONArrayRemoveOutOfBounds(t *testing.T) {
+	chunk := NewChunk()
+	arrIdx := chunk.AddConstant(`["a","b"]`)
+	idxIdx := chunk.AddConstant("10") // Out of bounds
+	chunk.EmitWithOperand(OpConst, uint16Bytes(arrIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idxIdx)...)
+	chunk.Emit(OpArrayRemove)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Should return original array for out of bounds
+	if result != `["a","b"]` {
+		t.Errorf("Expected original array, got %q", result)
+	}
+}
+
+// TestVMStackPeek tests that peek doesn't consume the value
+func TestVMStackPeek(t *testing.T) {
+	// This tests OpDup which uses peek internally
+	chunk := NewChunk()
+	idx := chunk.AddConstant("test")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	chunk.Emit(OpDup)
+	chunk.Emit(OpPop) // Pop the duplicate
+	chunk.Emit(OpReturn) // Return the original
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != "test" {
+		t.Errorf("Expected 'test', got %q", result)
+	}
+}
+
+// TestVMBlockValue tests the BLOCK_VALUE opcode (invoke with 0 args)
+func TestVMBlockValue(t *testing.T) {
+	// Create a chunk that returns "42"
+	innerChunk := NewChunk()
+	idx := innerChunk.AddConstant("42")
+	innerChunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	innerChunk.Emit(OpReturn)
+
+	vm := NewVM()
+
+	// Register the block
+	blockID := vm.registerBlock(innerChunk, nil)
+
+	// Create outer chunk that invokes the block
+	chunk := NewChunk()
+	blockIdx := chunk.AddConstant(blockID)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(blockIdx)...)
+	chunk.Emit(OpBlockValue)
+	chunk.Emit(OpReturn)
+
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != "42" {
+		t.Errorf("Expected '42', got %q", result)
+	}
+}
+
+// TestVMInvokeBlock tests the INVOKE_BLOCK opcode with args
+func TestVMInvokeBlock(t *testing.T) {
+	// Create a chunk that adds its param to 10: [:x | x + 10]
+	innerChunk := NewChunk()
+	innerChunk.ParamCount = 1
+	innerChunk.ParamNames = []string{"x"}
+	tenIdx := innerChunk.AddConstant("10")
+	innerChunk.EmitWithOperand(OpLoadParam, 0)
+	innerChunk.EmitWithOperand(OpConst, uint16Bytes(tenIdx)...)
+	innerChunk.Emit(OpAdd)
+	innerChunk.Emit(OpReturn)
+
+	vm := NewVM()
+
+	// Register the block
+	blockID := vm.registerBlock(innerChunk, nil)
+
+	// Create outer chunk that invokes the block with arg "5"
+	chunk := NewChunk()
+	blockIdx := chunk.AddConstant(blockID)
+	argIdx := chunk.AddConstant("5")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(blockIdx)...) // Push block ID
+	chunk.EmitWithOperand(OpConst, uint16Bytes(argIdx)...)   // Push arg
+	chunk.EmitWithOperand(OpInvokeBlock, 1)                  // Invoke with 1 arg
+	chunk.Emit(OpReturn)
+
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != "15" {
+		t.Errorf("Expected '15', got %q", result)
+	}
+}
+
+// TestVMInvokeBlockMultipleArgs tests INVOKE_BLOCK with multiple args
+func TestVMInvokeBlockMultipleArgs(t *testing.T) {
+	// Create a chunk: [:a :b :c | a + b + c]
+	innerChunk := NewChunk()
+	innerChunk.ParamCount = 3
+	innerChunk.ParamNames = []string{"a", "b", "c"}
+	innerChunk.EmitWithOperand(OpLoadParam, 0)
+	innerChunk.EmitWithOperand(OpLoadParam, 1)
+	innerChunk.Emit(OpAdd)
+	innerChunk.EmitWithOperand(OpLoadParam, 2)
+	innerChunk.Emit(OpAdd)
+	innerChunk.Emit(OpReturn)
+
+	vm := NewVM()
+	blockID := vm.registerBlock(innerChunk, nil)
+
+	// Invoke with args 10, 20, 12
+	chunk := NewChunk()
+	blockIdx := chunk.AddConstant(blockID)
+	arg1Idx := chunk.AddConstant("10")
+	arg2Idx := chunk.AddConstant("20")
+	arg3Idx := chunk.AddConstant("12")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(blockIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(arg1Idx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(arg2Idx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(arg3Idx)...)
+	chunk.EmitWithOperand(OpInvokeBlock, 3)
+	chunk.Emit(OpReturn)
+
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != "42" {
+		t.Errorf("Expected '42', got %q", result)
+	}
+}
+
+// TestVMInvokeBlockNotFound tests INVOKE_BLOCK with invalid block ID
+func TestVMInvokeBlockNotFound(t *testing.T) {
+	vm := NewVM()
+
+	chunk := NewChunk()
+	blockIdx := chunk.AddConstant("invalid_block_id")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(blockIdx)...)
+	chunk.Emit(OpBlockValue)
+	chunk.Emit(OpReturn)
+
+	_, err := vm.Execute(chunk, "", nil)
+	// Expected to fail because block doesn't exist
+	if err == nil {
+		t.Error("Expected error for invalid block")
+	}
+}
+
+// TestVMJSONObjectAtPutNested tests OBJECT_AT_PUT with nested objects
+func TestVMJSONObjectAtPutNested(t *testing.T) {
+	chunk := NewChunk()
+	objIdx := chunk.AddConstant(`{"outer":{"inner":1}}`)
+	keyIdx := chunk.AddConstant("newKey")
+	valIdx := chunk.AddConstant(`{"nested":"value"}`)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(objIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(keyIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(valIdx)...)
+	chunk.Emit(OpObjectAtPut)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Result should contain both keys
+	if result == "" {
+		t.Error("Expected non-empty result")
+	}
+}
+
+// TestVMSwapAndRot tests stack manipulation opcodes
+func TestVMSwapAndRot(t *testing.T) {
+	// Test SWAP
+	swapChunk := NewChunk()
+	idx1 := swapChunk.AddConstant("A")
+	idx2 := swapChunk.AddConstant("B")
+	swapChunk.EmitWithOperand(OpConst, uint16Bytes(idx1)...)
+	swapChunk.EmitWithOperand(OpConst, uint16Bytes(idx2)...)
+	swapChunk.Emit(OpSwap)
+	swapChunk.Emit(OpReturn) // Should return "A" (was on top after swap)
+
+	vm := NewVM()
+	result, err := vm.Execute(swapChunk, "", nil)
+	if err != nil {
+		t.Fatalf("SWAP Execute failed: %v", err)
+	}
+	if result != "A" {
+		t.Errorf("SWAP: Expected 'A', got %q", result)
+	}
+
+	// Test ROT: a b c -> b c a
+	rotChunk := NewChunk()
+	idxA := rotChunk.AddConstant("A")
+	idxB := rotChunk.AddConstant("B")
+	idxC := rotChunk.AddConstant("C")
+	rotChunk.EmitWithOperand(OpConst, uint16Bytes(idxA)...)
+	rotChunk.EmitWithOperand(OpConst, uint16Bytes(idxB)...)
+	rotChunk.EmitWithOperand(OpConst, uint16Bytes(idxC)...)
+	rotChunk.Emit(OpRot)
+	rotChunk.Emit(OpReturn) // Should return "A" (rotated to top)
+
+	result, err = vm.Execute(rotChunk, "", nil)
+	if err != nil {
+		t.Fatalf("ROT Execute failed: %v", err)
+	}
+	if result != "A" {
+		t.Errorf("ROT: Expected 'A', got %q", result)
+	}
+}

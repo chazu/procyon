@@ -1073,9 +1073,49 @@ func jsonObjectKeys(obj string) string {
 	if obj == "" || obj == "{}" {
 		return "[]"
 	}
-	// Simplified - returns array of keys
-	// Real implementation would parse properly
-	return "[]" // TODO: proper implementation
+	// Parse object and extract keys
+	inner := obj[1 : len(obj)-1]
+	if strings.TrimSpace(inner) == "" {
+		return "[]"
+	}
+	keys := []string{}
+	depth := 0
+	inString := false
+	start := -1
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		if c == '"' && (i == 0 || inner[i-1] != '\\') {
+			if !inString && depth == 0 {
+				start = i + 1
+			} else if inString && depth == 0 && start >= 0 {
+				keys = append(keys, inner[start:i])
+				start = -1
+			}
+			inString = !inString
+		} else if !inString {
+			if c == '{' || c == '[' {
+				depth++
+			} else if c == '}' || c == ']' {
+				depth--
+			} else if c == ':' && depth == 0 {
+				// After colon, skip to next comma at depth 0
+				start = -1
+			}
+		}
+	}
+	// Build result
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i, k := range keys {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(`"`)
+		sb.WriteString(k)
+		sb.WriteString(`"`)
+	}
+	sb.WriteString("]")
+	return sb.String()
 }
 
 func jsonObjectValues(obj string) string {
@@ -1083,12 +1123,101 @@ func jsonObjectValues(obj string) string {
 	if obj == "" || obj == "{}" {
 		return "[]"
 	}
-	return "[]" // TODO: proper implementation
+	// Parse object and extract values
+	inner := obj[1 : len(obj)-1]
+	if strings.TrimSpace(inner) == "" {
+		return "[]"
+	}
+	values := []string{}
+	depth := 0
+	inString := false
+	afterColon := false
+	valueStart := -1
+	for i := 0; i <= len(inner); i++ {
+		c := byte(0)
+		if i < len(inner) {
+			c = inner[i]
+		}
+		if c == '"' && (i == 0 || inner[i-1] != '\\') {
+			inString = !inString
+		}
+		if !inString {
+			if c == '{' || c == '[' {
+				depth++
+			} else if c == '}' || c == ']' {
+				depth--
+			} else if c == ':' && depth == 0 && !afterColon {
+				afterColon = true
+				// Skip whitespace after colon
+				for i+1 < len(inner) && (inner[i+1] == ' ' || inner[i+1] == '\t') {
+					i++
+				}
+				valueStart = i + 1
+			} else if (c == ',' || i == len(inner)) && depth == 0 && afterColon {
+				if valueStart >= 0 && valueStart < len(inner) {
+					val := strings.TrimSpace(inner[valueStart:i])
+					values = append(values, val)
+				}
+				afterColon = false
+				valueStart = -1
+			}
+		}
+	}
+	// Build result
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i, v := range values {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(v)
+	}
+	sb.WriteString("]")
+	return sb.String()
 }
 
 func jsonObjectRemove(obj string, key string) string {
-	// Simplified
-	return obj // TODO: proper implementation
+	obj = strings.TrimSpace(obj)
+	if obj == "" || obj == "{}" {
+		return obj
+	}
+	// Parse and rebuild without the key
+	inner := obj[1 : len(obj)-1]
+	result := []string{}
+	depth := 0
+	inString := false
+	entryStart := 0
+	currentKey := ""
+	keyStart := -1
+	for i := 0; i <= len(inner); i++ {
+		c := byte(0)
+		if i < len(inner) {
+			c = inner[i]
+		}
+		if c == '"' && (i == 0 || inner[i-1] != '\\') {
+			if !inString && depth == 0 && keyStart < 0 {
+				keyStart = i + 1
+			} else if inString && depth == 0 && keyStart >= 0 {
+				currentKey = inner[keyStart:i]
+				keyStart = -1
+			}
+			inString = !inString
+		} else if !inString {
+			if c == '{' || c == '[' {
+				depth++
+			} else if c == '}' || c == ']' {
+				depth--
+			} else if (c == ',' || i == len(inner)) && depth == 0 {
+				entry := strings.TrimSpace(inner[entryStart:i])
+				if currentKey != key && entry != "" {
+					result = append(result, entry)
+				}
+				entryStart = i + 1
+				currentKey = ""
+			}
+		}
+	}
+	return "{" + strings.Join(result, ",") + "}"
 }
 
 func jsonObjectLen(obj string) int {
@@ -1096,10 +1225,27 @@ func jsonObjectLen(obj string) int {
 	if obj == "" || obj == "{}" {
 		return 0
 	}
-	// Count commas + 1 (simplified)
+	// Count top-level key-value pairs
 	inner := obj[1 : len(obj)-1]
 	if strings.TrimSpace(inner) == "" {
 		return 0
 	}
-	return strings.Count(inner, ":") // Rough approximation
+	count := 0
+	depth := 0
+	inString := false
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		if c == '"' && (i == 0 || inner[i-1] != '\\') {
+			inString = !inString
+		} else if !inString {
+			if c == '{' || c == '[' {
+				depth++
+			} else if c == '}' || c == ']' {
+				depth--
+			} else if c == ':' && depth == 0 {
+				count++
+			}
+		}
+	}
+	return count
 }

@@ -947,3 +947,705 @@ func TestAnalyzeCapturesMethodParams(t *testing.T) {
 		t.Errorf("Expected VarSourceParam, got %v", captures[0].Source)
 	}
 }
+
+// ============ Additional Coverage Tests ============
+
+// TestCompileIfNilExpr tests ifNil:/ifNotNil: compilation
+func TestCompileIfNilExpr(t *testing.T) {
+	// Test: x ifNil: [0] ifNotNil: [x]
+	// This is represented as a MessageSend with ifNil: and block args
+	block := &parser.BlockExpr{
+		Params: []string{"x"},
+		Statements: []parser.Statement{
+			&parser.Return{
+				Value: &parser.MessageSend{
+					Receiver: &parser.Identifier{Name: "x"},
+					Selector: "ifNil:ifNotNil:",
+					Args: []parser.Expr{
+						&parser.BlockExpr{
+							Statements: []parser.Statement{
+								&parser.Return{Value: &parser.NumberLit{Value: "0"}},
+							},
+						},
+						&parser.BlockExpr{
+							Params: []string{"val"},
+							Statements: []parser.Statement{
+								&parser.Return{Value: &parser.Identifier{Name: "val"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have generated some code
+	if len(chunk.Code) < 5 {
+		t.Errorf("Expected significant code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileIteration tests do: and collect: iteration compilation
+func TestCompileIteration(t *testing.T) {
+	// Test: array do: [:each | each + 1]
+	block := &parser.BlockExpr{
+		Statements: []parser.Statement{
+			&parser.ExprStmt{
+				Expr: &parser.MessageSend{
+					Receiver: &parser.Identifier{Name: "array"},
+					Selector: "do:",
+					Args: []parser.Expr{
+						&parser.BlockExpr{
+							Params: []string{"each"},
+							Statements: []parser.Statement{
+								&parser.ExprStmt{
+									Expr: &parser.BinaryExpr{
+										Op:    "+",
+										Left:  &parser.Identifier{Name: "each"},
+										Right: &parser.NumberLit{Value: "1"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{
+		MethodLocals: []string{"array"},
+	}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have code for iteration setup
+	if len(chunk.Code) < 5 {
+		t.Errorf("Expected iteration code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileCollectIteration tests collect: iteration with value return
+func TestCompileCollectIteration(t *testing.T) {
+	// Test: array collect: [:each | each * 2]
+	block := &parser.BlockExpr{
+		Statements: []parser.Statement{
+			&parser.Return{
+				Value: &parser.MessageSend{
+					Receiver: &parser.Identifier{Name: "array"},
+					Selector: "collect:",
+					Args: []parser.Expr{
+						&parser.BlockExpr{
+							Params: []string{"each"},
+							Statements: []parser.Statement{
+								&parser.Return{
+									Value: &parser.BinaryExpr{
+										Op:    "*",
+										Left:  &parser.Identifier{Name: "each"},
+										Right: &parser.NumberLit{Value: "2"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{
+		MethodLocals: []string{"array"},
+	}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	if len(chunk.Code) < 5 {
+		t.Errorf("Expected collect code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileIfExpressionValue tests if expressions that return values using IfExpr
+func TestCompileIfExpressionValue(t *testing.T) {
+	// Test: (x > 0) ifTrue: [1] ifFalse: [0]
+	// Use IfExpr directly as the parser would produce
+	block := &parser.BlockExpr{
+		Params: []string{"x"},
+		Statements: []parser.Statement{
+			&parser.Return{
+				Value: &parser.IfExpr{
+					Condition: &parser.ComparisonExpr{
+						Op:    ">",
+						Left:  &parser.Identifier{Name: "x"},
+						Right: &parser.NumberLit{Value: "0"},
+					},
+					TrueBlock: []parser.Statement{
+						&parser.Return{Value: &parser.NumberLit{Value: "1"}},
+					},
+					FalseBlock: []parser.Statement{
+						&parser.Return{Value: &parser.NumberLit{Value: "0"}},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have conditional jump code
+	hasJump := false
+	for i := 0; i < len(chunk.Code); i++ {
+		op := Opcode(chunk.Code[i])
+		if op.IsJump() {
+			hasJump = true
+			break
+		}
+		i += op.OperandLen()
+	}
+	if !hasJump {
+		t.Error("Expected jump instruction for if expression")
+	}
+}
+
+// TestCompileClassSend tests class method sends
+func TestCompileClassSend(t *testing.T) {
+	// Test: Counter new
+	block := &parser.BlockExpr{
+		Statements: []parser.Statement{
+			&parser.Return{
+				Value: &parser.MessageSend{
+					Receiver: &parser.Identifier{Name: "Counter"},
+					Selector: "new",
+					Args:     []parser.Expr{},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have SEND_CLASS or similar
+	if len(chunk.Code) < 3 {
+		t.Errorf("Expected class send code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileSelectIteration tests select: iteration
+func TestCompileSelectIteration(t *testing.T) {
+	// Test: array select: [:each | each > 0]
+	block := &parser.BlockExpr{
+		Statements: []parser.Statement{
+			&parser.Return{
+				Value: &parser.MessageSend{
+					Receiver: &parser.Identifier{Name: "array"},
+					Selector: "select:",
+					Args: []parser.Expr{
+						&parser.BlockExpr{
+							Params: []string{"each"},
+							Statements: []parser.Statement{
+								&parser.Return{
+									Value: &parser.ComparisonExpr{
+										Op:    ">",
+										Left:  &parser.Identifier{Name: "each"},
+										Right: &parser.NumberLit{Value: "0"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{
+		MethodLocals: []string{"array"},
+	}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	if len(chunk.Code) < 5 {
+		t.Errorf("Expected select code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileInjectInto tests inject:into: iteration
+func TestCompileInjectInto(t *testing.T) {
+	// Test: array inject: 0 into: [:sum :each | sum + each]
+	block := &parser.BlockExpr{
+		Statements: []parser.Statement{
+			&parser.Return{
+				Value: &parser.MessageSend{
+					Receiver: &parser.Identifier{Name: "array"},
+					Selector: "inject:into:",
+					Args: []parser.Expr{
+						&parser.NumberLit{Value: "0"},
+						&parser.BlockExpr{
+							Params: []string{"sum", "each"},
+							Statements: []parser.Statement{
+								&parser.Return{
+									Value: &parser.BinaryExpr{
+										Op:    "+",
+										Left:  &parser.Identifier{Name: "sum"},
+										Right: &parser.Identifier{Name: "each"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{
+		MethodLocals: []string{"array"},
+	}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	if len(chunk.Code) < 5 {
+		t.Errorf("Expected inject:into: code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileTimesRepeat tests timesRepeat: iteration
+func TestCompileTimesRepeat(t *testing.T) {
+	// Test: 5 timesRepeat: [x := x + 1]
+	block := &parser.BlockExpr{
+		Statements: []parser.Statement{
+			&parser.ExprStmt{
+				Expr: &parser.MessageSend{
+					Receiver: &parser.NumberLit{Value: "5"},
+					Selector: "timesRepeat:",
+					Args: []parser.Expr{
+						&parser.BlockExpr{
+							Statements: []parser.Statement{
+								&parser.Assignment{
+									Target: "x",
+									Value: &parser.BinaryExpr{
+										Op:    "+",
+										Left:  &parser.Identifier{Name: "x"},
+										Right: &parser.NumberLit{Value: "1"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{
+		MethodLocals: []string{"x"},
+	}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	if len(chunk.Code) < 5 {
+		t.Errorf("Expected timesRepeat code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileIfNilOnly tests ifNil: only
+func TestCompileIfNilOnly(t *testing.T) {
+	// Test: value ifNil: [^ 0]
+	block := &parser.BlockExpr{
+		Params: []string{"value"},
+		Statements: []parser.Statement{
+			&parser.IfNilExpr{
+				Subject:  &parser.Identifier{Name: "value"},
+				NilBlock: []parser.Statement{
+					&parser.Return{Value: &parser.NumberLit{Value: "0"}},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have jump instructions
+	hasJump := false
+	for i := 0; i < len(chunk.Code); i++ {
+		op := Opcode(chunk.Code[i])
+		if op == OpJumpNotNil {
+			hasJump = true
+			break
+		}
+		i += op.OperandLen()
+	}
+	if !hasJump {
+		t.Error("Expected JumpNotNil instruction for ifNil:")
+	}
+}
+
+// TestCompileIfNotNilOnly tests ifNotNil: only
+func TestCompileIfNotNilOnly(t *testing.T) {
+	// Test: value ifNotNil: [:v | ^ v]
+	block := &parser.BlockExpr{
+		Params: []string{"value"},
+		Statements: []parser.Statement{
+			&parser.IfNilExpr{
+				Subject: &parser.Identifier{Name: "value"},
+				NotNilBlock: []parser.Statement{
+					&parser.Return{Value: &parser.Identifier{Name: "v"}},
+				},
+				BindingVar: "v",
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have OpJumpNil and OpDup/OpStoreLocal for binding
+	hasJumpNil := false
+	for i := 0; i < len(chunk.Code); i++ {
+		op := Opcode(chunk.Code[i])
+		if op == OpJumpNil {
+			hasJumpNil = true
+			break
+		}
+		i += op.OperandLen()
+	}
+	if !hasJumpNil {
+		t.Error("Expected JumpNil instruction for ifNotNil:")
+	}
+}
+
+// TestCompileIfNilIfNotNil tests both ifNil: and ifNotNil:
+func TestCompileIfNilIfNotNil(t *testing.T) {
+	// Test: value ifNil: [^ 0] ifNotNil: [:v | ^ v + 1]
+	block := &parser.BlockExpr{
+		Params: []string{"value"},
+		Statements: []parser.Statement{
+			&parser.IfNilExpr{
+				Subject: &parser.Identifier{Name: "value"},
+				NilBlock: []parser.Statement{
+					&parser.Return{Value: &parser.NumberLit{Value: "0"}},
+				},
+				NotNilBlock: []parser.Statement{
+					&parser.Return{
+						Value: &parser.BinaryExpr{
+							Op:    "+",
+							Left:  &parser.Identifier{Name: "v"},
+							Right: &parser.NumberLit{Value: "1"},
+						},
+					},
+				},
+				BindingVar: "v",
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have both OpJumpNotNil and OpJump
+	hasJumpNotNil := false
+	hasJump := false
+	for i := 0; i < len(chunk.Code); i++ {
+		op := Opcode(chunk.Code[i])
+		if op == OpJumpNotNil {
+			hasJumpNotNil = true
+		}
+		if op == OpJump {
+			hasJump = true
+		}
+		i += op.OperandLen()
+	}
+	if !hasJumpNotNil || !hasJump {
+		t.Errorf("Expected JumpNotNil and Jump for ifNil:ifNotNil:, got JumpNotNil=%v Jump=%v", hasJumpNotNil, hasJump)
+	}
+}
+
+// TestCompileIterationDo tests do: iteration
+func TestCompileIterationDo(t *testing.T) {
+	// Test: items do: [:item | @ self process: item]
+	block := &parser.BlockExpr{
+		Params: []string{"items"},
+		Statements: []parser.Statement{
+			&parser.IterationExpr{
+				Collection: &parser.Identifier{Name: "items"},
+				IterVar:    "item",
+				Kind:       "do",
+				Body: []parser.Statement{
+					&parser.ExprStmt{
+						Expr: &parser.MessageSend{
+							Receiver: &parser.Identifier{Name: "self"},
+							Selector: "process:",
+							Args:     []parser.Expr{&parser.Identifier{Name: "item"}},
+							IsSelf:   true,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have loop instructions
+	if len(chunk.Code) < 10 {
+		t.Errorf("Expected iteration code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileIterationSelect tests select: iteration (as statement)
+func TestCompileIterationSelect(t *testing.T) {
+	// Test: items select: [:item | item > 0] (as a statement)
+	block := &parser.BlockExpr{
+		Params: []string{"items"},
+		Statements: []parser.Statement{
+			&parser.IterationExpr{
+				Collection: &parser.Identifier{Name: "items"},
+				IterVar:    "item",
+				Kind:       "select",
+				Body: []parser.Statement{
+					&parser.Return{
+						Value: &parser.ComparisonExpr{
+							Op:    ">",
+							Left:  &parser.Identifier{Name: "item"},
+							Right: &parser.NumberLit{Value: "0"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have iteration code
+	if len(chunk.Code) < 10 {
+		t.Errorf("Expected select iteration code, got %d bytes", len(chunk.Code))
+	}
+}
+
+// TestCompileClassPrimitive tests class primitive expressions
+func TestCompileClassPrimitive(t *testing.T) {
+	// Test: String#isEmpty(str)
+	block := &parser.BlockExpr{
+		Params: []string{"str"},
+		Statements: []parser.Statement{
+			&parser.Return{
+				Value: &parser.ClassPrimitiveExpr{
+					ClassName: "String",
+					Operation: "isEmpty",
+					Args:      []parser.Expr{&parser.Identifier{Name: "str"}},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have SEND_CLASS opcode
+	hasClassSend := false
+	for i := 0; i < len(chunk.Code); i++ {
+		op := Opcode(chunk.Code[i])
+		if op == OpSendClass {
+			hasClassSend = true
+			break
+		}
+		i += op.OperandLen()
+	}
+	if !hasClassSend {
+		t.Error("Expected OpSendClass for class primitive")
+	}
+}
+
+// TestAddSourceLocation tests source location tracking
+func TestAddSourceLocation(t *testing.T) {
+	chunk := NewChunk()
+
+	// Emit some code
+	chunk.Code = append(chunk.Code, byte(OpConst))
+	chunk.Code = append(chunk.Code, 0, 0)
+
+	// Add source location (offset, line, column)
+	chunk.AddSourceLocation(0, 10, 5)
+
+	// Check that we can retrieve it
+	line, column := chunk.GetSourceLocation(0)
+	if line != 10 {
+		t.Errorf("Expected line 10, got %d", line)
+	}
+	if column != 5 {
+		t.Errorf("Expected column 5, got %d", column)
+	}
+}
+
+// TestCompilerContextInstanceVars tests instance variable handling
+// In this design, instance variables accessed from blocks are treated as captures
+func TestCompilerContextInstanceVars(t *testing.T) {
+	// Test: value := x + 1 (where value is an instance variable)
+	block := &parser.BlockExpr{
+		Params: []string{"x"},
+		Statements: []parser.Statement{
+			&parser.Assignment{
+				Target: "value",
+				Value: &parser.BinaryExpr{
+					Op:    "+",
+					Left:  &parser.Identifier{Name: "x"},
+					Right: &parser.NumberLit{Value: "1"},
+				},
+			},
+		},
+	}
+
+	ctx := &CompilerContext{
+		InstanceVars: []string{"value", "count"},
+	}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Instance variables are captured when accessed from blocks
+	// Verify capture info was set up correctly
+	if len(chunk.CaptureInfo) == 0 {
+		t.Error("Expected instance variable to be captured")
+	}
+
+	foundValueCapture := false
+	for _, cap := range chunk.CaptureInfo {
+		if cap.Name == "value" && cap.Source == VarSourceIVar {
+			foundValueCapture = true
+			break
+		}
+	}
+	if !foundValueCapture {
+		t.Error("Expected 'value' to be captured as an ivar")
+	}
+
+	// Should have capture store operation (ivars are accessed as captures in blocks)
+	hasStoreCapture := false
+	for i := 0; i < len(chunk.Code); i++ {
+		op := Opcode(chunk.Code[i])
+		if op == OpStoreCapture {
+			hasStoreCapture = true
+			break
+		}
+		i += op.OperandLen()
+	}
+	if !hasStoreCapture {
+		t.Error("Expected OpStoreCapture for instance variable assignment from block")
+	}
+}
+
+// TestPatchJumpTo tests patching jumps to specific offsets
+func TestPatchJumpTo(t *testing.T) {
+	chunk := NewChunk()
+
+	// Emit a jump instruction
+	chunk.Code = append(chunk.Code, byte(OpJump))
+	placeholderOffset := len(chunk.Code)
+	chunk.Code = append(chunk.Code, 0, 0) // placeholder for delta
+
+	// Emit some filler code
+	chunk.Code = append(chunk.Code, byte(OpConst), 0, 0)
+	chunk.Code = append(chunk.Code, byte(OpConst), 0, 0)
+
+	targetOffset := len(chunk.Code)
+
+	// Patch the jump
+	chunk.PatchJumpTo(placeholderOffset, targetOffset)
+
+	// PatchJumpTo stores delta = target - (placeholderOffset + 2)
+	// delta = 9 - 3 = 6
+	expectedDelta := targetOffset - (placeholderOffset + 2)
+
+	// Delta is stored big-endian
+	patchedDelta := int16(uint16(chunk.Code[placeholderOffset])<<8 | uint16(chunk.Code[placeholderOffset+1]))
+	if int(patchedDelta) != expectedDelta {
+		t.Errorf("Expected delta %d, got %d", expectedDelta, patchedDelta)
+	}
+}
+
+// TestCompileIfTrueOnly tests ifTrue: without ifFalse:
+func TestCompileIfTrueOnly(t *testing.T) {
+	// Test: x > 0 ifTrue: [^ 1]
+	block := &parser.BlockExpr{
+		Params: []string{"x"},
+		Statements: []parser.Statement{
+			&parser.IfExpr{
+				Condition: &parser.ComparisonExpr{
+					Op:    ">",
+					Left:  &parser.Identifier{Name: "x"},
+					Right: &parser.NumberLit{Value: "0"},
+				},
+				TrueBlock: []parser.Statement{
+					&parser.Return{Value: &parser.NumberLit{Value: "1"}},
+				},
+				FalseBlock: nil, // No else branch
+			},
+		},
+	}
+
+	ctx := &CompilerContext{}
+	chunk, err := CompileBlock(block, ctx)
+	if err != nil {
+		t.Fatalf("CompileBlock failed: %v", err)
+	}
+
+	// Should have conditional jump
+	hasJumpFalse := false
+	for i := 0; i < len(chunk.Code); i++ {
+		op := Opcode(chunk.Code[i])
+		if op == OpJumpFalse {
+			hasJumpFalse = true
+			break
+		}
+		i += op.OperandLen()
+	}
+	if !hasJumpFalse {
+		t.Error("Expected JumpFalse instruction for ifTrue: only")
+	}
+}
