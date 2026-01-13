@@ -1431,3 +1431,403 @@ func TestVMTraceMode(t *testing.T) {
 		t.Errorf("Expected '2', got %q", result)
 	}
 }
+
+// ============ Advanced Capture Semantics Tests ============
+
+// TestCaptureCellSharing tests that multiple blocks can share a capture cell
+func TestCaptureCellSharing(t *testing.T) {
+	// Create a shared capture cell
+	sharedCell := &CaptureCell{
+		Value:  "shared",
+		Name:   "x",
+		Source: VarSourceLocal,
+	}
+
+	// Simulate two blocks sharing the same capture
+	captures1 := []*CaptureCell{sharedCell}
+	captures2 := []*CaptureCell{sharedCell}
+
+	// Block 1 modifies the capture
+	sharedCell.Set("modified_by_block1")
+
+	// Block 2 should see the change
+	if captures2[0].Get() != "modified_by_block1" {
+		t.Errorf("Shared capture not visible: expected 'modified_by_block1', got %q", captures2[0].Get())
+	}
+
+	// Verify both still point to same cell
+	if captures1[0] != captures2[0] {
+		t.Error("Capture cells should be the same reference")
+	}
+}
+
+// TestCaptureCellMultipleSources tests captures from different variable sources
+func TestCaptureCellMultipleSources(t *testing.T) {
+	accessor := NewMockInstanceAccessor()
+	accessor.Vars["obj_123"] = map[string]string{"ivar1": "ivar_value"}
+
+	captures := []*CaptureCell{
+		// Local variable capture
+		{Value: "local_value", Name: "local", Source: VarSourceLocal},
+		// IVar capture with accessor
+		{Value: "", Name: "ivar1", Source: VarSourceIVar, InstanceID: "obj_123", Accessor: accessor},
+		// Parameter capture
+		{Value: "param_value", Name: "param", Source: VarSourceParam},
+	}
+
+	// Test each capture reads correctly
+	if captures[0].Get() != "local_value" {
+		t.Errorf("Local capture: expected 'local_value', got %q", captures[0].Get())
+	}
+	if captures[1].Get() != "ivar_value" {
+		t.Errorf("IVar capture: expected 'ivar_value', got %q", captures[1].Get())
+	}
+	if captures[2].Get() != "param_value" {
+		t.Errorf("Param capture: expected 'param_value', got %q", captures[2].Get())
+	}
+
+	// Update each and verify
+	captures[0].Set("new_local")
+	captures[1].Set("new_ivar")
+	captures[2].Set("new_param")
+
+	if captures[0].Get() != "new_local" {
+		t.Errorf("Local capture update failed")
+	}
+	if accessor.Vars["obj_123"]["ivar1"] != "new_ivar" {
+		t.Errorf("IVar writeback failed: expected 'new_ivar', got %q", accessor.Vars["obj_123"]["ivar1"])
+	}
+	if captures[2].Get() != "new_param" {
+		t.Errorf("Param capture update failed")
+	}
+}
+
+// TestCaptureCellIVarFreshRead tests that unclosed ivar captures read fresh values
+func TestCaptureCellIVarFreshRead(t *testing.T) {
+	accessor := NewMockInstanceAccessor()
+	accessor.Vars["obj_123"] = map[string]string{"count": "10"}
+
+	cell := &CaptureCell{
+		Value:      "stale",
+		Name:       "count",
+		Source:     VarSourceIVar,
+		InstanceID: "obj_123",
+		Accessor:   accessor,
+	}
+
+	// Get should read fresh value, not stale cached value
+	if cell.Get() != "10" {
+		t.Errorf("Expected fresh '10', got %q", cell.Get())
+	}
+
+	// External modification
+	accessor.Vars["obj_123"]["count"] = "20"
+
+	// Get should read the new fresh value
+	if cell.Get() != "20" {
+		t.Errorf("Expected fresh '20', got %q", cell.Get())
+	}
+}
+
+// TestCaptureCellLocalNoFreshRead tests that local captures use cached value
+func TestCaptureCellLocalNoFreshRead(t *testing.T) {
+	cell := &CaptureCell{
+		Value:  "original",
+		Name:   "x",
+		Source: VarSourceLocal,
+	}
+
+	// Local captures should return cached value
+	if cell.Get() != "original" {
+		t.Errorf("Expected 'original', got %q", cell.Get())
+	}
+
+	// Value property is the source for locals
+	cell.Value = "modified_directly"
+	if cell.Get() != "modified_directly" {
+		t.Errorf("Expected 'modified_directly', got %q", cell.Get())
+	}
+}
+
+// ============ Closure Cleanup Tests ============
+
+// TestCaptureCellClosePreventsFreshReads tests that closed cells don't read from DB
+func TestCaptureCellClosePreventsFreshReads(t *testing.T) {
+	accessor := NewMockInstanceAccessor()
+	accessor.Vars["obj_123"] = map[string]string{"count": "10"}
+
+	cell := &CaptureCell{
+		Value:      "",
+		Name:       "count",
+		Source:     VarSourceIVar,
+		InstanceID: "obj_123",
+		Accessor:   accessor,
+	}
+
+	// Close captures the current value
+	cell.Close()
+	if cell.Value != "10" {
+		t.Errorf("Close should snapshot value: expected '10', got %q", cell.Value)
+	}
+	if !cell.Closed {
+		t.Error("Cell should be marked as closed")
+	}
+
+	// External modification after close
+	accessor.Vars["obj_123"]["count"] = "9999"
+
+	// Closed cell should NOT read fresh value
+	if cell.Get() != "10" {
+		t.Errorf("Closed cell should return snapshotted '10', got %q", cell.Get())
+	}
+}
+
+// TestCaptureCellClosePreventsWriteback tests that closed cells don't write to DB
+func TestCaptureCellClosePreventsWriteback(t *testing.T) {
+	accessor := NewMockInstanceAccessor()
+	accessor.Vars["obj_123"] = map[string]string{"count": "10"}
+
+	cell := &CaptureCell{
+		Value:      "",
+		Name:       "count",
+		Source:     VarSourceIVar,
+		InstanceID: "obj_123",
+		Accessor:   accessor,
+	}
+
+	// Close the cell
+	cell.Close()
+
+	// Try to set a new value
+	cell.Set("999")
+
+	// Cell's Value should be updated
+	if cell.Value != "999" {
+		t.Errorf("Cell value should be '999', got %q", cell.Value)
+	}
+
+	// But DB should NOT be updated (still has original value)
+	if accessor.Vars["obj_123"]["count"] != "10" {
+		t.Errorf("DB should NOT be updated after close: expected '10', got %q", accessor.Vars["obj_123"]["count"])
+	}
+}
+
+// TestCaptureCellDoubleClose tests that closing twice is safe
+func TestCaptureCellDoubleClose(t *testing.T) {
+	accessor := NewMockInstanceAccessor()
+	accessor.Vars["obj_123"] = map[string]string{"count": "10"}
+
+	cell := &CaptureCell{
+		Value:      "",
+		Name:       "count",
+		Source:     VarSourceIVar,
+		InstanceID: "obj_123",
+		Accessor:   accessor,
+	}
+
+	// First close
+	cell.Close()
+	if cell.Value != "10" {
+		t.Errorf("First close should snapshot '10', got %q", cell.Value)
+	}
+
+	// Modify DB value
+	accessor.Vars["obj_123"]["count"] = "20"
+
+	// Second close should be a no-op (shouldn't re-read DB)
+	cell.Close()
+	if cell.Value != "10" {
+		t.Errorf("Second close should keep original '10', got %q", cell.Value)
+	}
+}
+
+// TestCaptureCellCloseWithNilAccessor tests Close with nil accessor
+func TestCaptureCellCloseWithNilAccessor(t *testing.T) {
+	cell := &CaptureCell{
+		Value:      "initial",
+		Name:       "ivar",
+		Source:     VarSourceIVar,
+		InstanceID: "obj_123",
+		Accessor:   nil, // No accessor
+	}
+
+	// Should not panic
+	cell.Close()
+
+	// Should keep existing value
+	if cell.Value != "initial" {
+		t.Errorf("Expected 'initial', got %q", cell.Value)
+	}
+	if !cell.Closed {
+		t.Error("Cell should be marked as closed")
+	}
+}
+
+// TestCaptureCellRefCountConcurrent tests reference counting is thread-safe
+func TestCaptureCellRefCountConcurrent(t *testing.T) {
+	cell := &CaptureCell{
+		Value:    "test",
+		RefCount: 0,
+	}
+
+	// Simulate concurrent retains/releases
+	done := make(chan bool, 10)
+	for i := 0; i < 5; i++ {
+		go func() {
+			cell.Retain()
+			done <- true
+		}()
+	}
+	for i := 0; i < 5; i++ {
+		<-done
+	}
+
+	if cell.RefCount != 5 {
+		t.Errorf("Expected refcount 5, got %d", cell.RefCount)
+	}
+
+	for i := 0; i < 3; i++ {
+		go func() {
+			cell.Release()
+			done <- true
+		}()
+	}
+	for i := 0; i < 3; i++ {
+		<-done
+	}
+
+	if cell.RefCount != 2 {
+		t.Errorf("Expected refcount 2, got %d", cell.RefCount)
+	}
+}
+
+// TestCaptureCellWithEmptyInstanceID tests ivar capture with empty instance ID
+func TestCaptureCellWithEmptyInstanceID(t *testing.T) {
+	accessor := NewMockInstanceAccessor()
+
+	cell := &CaptureCell{
+		Value:      "initial",
+		Name:       "count",
+		Source:     VarSourceIVar,
+		InstanceID: "", // Empty instance ID
+		Accessor:   accessor,
+	}
+
+	// Get should return cached value (can't read without instance ID)
+	if cell.Get() != "initial" {
+		t.Errorf("Expected 'initial', got %q", cell.Get())
+	}
+
+	// Set should update local value but not DB
+	cell.Set("new_value")
+	if cell.Value != "new_value" {
+		t.Errorf("Expected 'new_value', got %q", cell.Value)
+	}
+}
+
+// ============ VM Capture Integration Tests ============
+
+// TestVMCaptureModificationPersists tests that capture changes persist across block boundary
+func TestVMCaptureModificationPersists(t *testing.T) {
+	// Block that modifies a capture and returns the new value
+	chunk := NewChunk()
+	chunk.CaptureInfo = []CaptureDescriptor{
+		{Name: "counter", Source: VarSourceLocal},
+	}
+
+	// Load capture, add 1, store back, load again and return
+	chunk.EmitWithOperand(OpLoadCapture, 0)
+	chunk.Emit(OpConstOne)
+	chunk.Emit(OpAdd)
+	chunk.EmitWithOperand(OpStoreCapture, 0)
+	chunk.EmitWithOperand(OpLoadCapture, 0)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	captures := []*CaptureCell{
+		{Value: "10", Name: "counter", Source: VarSourceLocal},
+	}
+
+	result, err := vm.ExecuteWithCaptures(chunk, "", nil, captures)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Result should be 11
+	if result != "11" {
+		t.Errorf("Expected '11', got %q", result)
+	}
+
+	// Capture should also be 11 (persisted)
+	if captures[0].Value != "11" {
+		t.Errorf("Capture should persist: expected '11', got %q", captures[0].Value)
+	}
+}
+
+// TestVMCaptureIVarIntegration tests ivar captures with VM execution
+func TestVMCaptureIVarIntegration(t *testing.T) {
+	accessor := NewMockInstanceAccessor()
+	accessor.Vars["counter_123"] = map[string]string{"value": "5"}
+
+	chunk := NewChunk()
+	chunk.CaptureInfo = []CaptureDescriptor{
+		{Name: "value", Source: VarSourceIVar},
+	}
+
+	// Load capture (should read from DB), add 10, store (should write to DB), return
+	chunk.EmitWithOperand(OpLoadCapture, 0)
+	idx := chunk.AddConstant("10")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	chunk.Emit(OpAdd)
+	chunk.EmitWithOperand(OpStoreCapture, 0)
+	chunk.EmitWithOperand(OpLoadCapture, 0)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	vm.SetInstanceAccessor(accessor)
+
+	captures := []*CaptureCell{
+		{Value: "", Name: "value", Source: VarSourceIVar, InstanceID: "counter_123", Accessor: accessor},
+	}
+
+	result, err := vm.ExecuteWithCaptures(chunk, "counter_123", nil, captures)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result != "15" {
+		t.Errorf("Expected '15', got %q", result)
+	}
+
+	// DB should be updated
+	if accessor.Vars["counter_123"]["value"] != "15" {
+		t.Errorf("DB should have '15', got %q", accessor.Vars["counter_123"]["value"])
+	}
+}
+
+// TestVMMissingCapture tests handling of missing capture index
+func TestVMMissingCapture(t *testing.T) {
+	chunk := NewChunk()
+	chunk.CaptureInfo = []CaptureDescriptor{
+		{Name: "x", Source: VarSourceLocal},
+	}
+
+	// Try to load capture index 5 (doesn't exist)
+	chunk.EmitWithOperand(OpLoadCapture, 5)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	captures := []*CaptureCell{
+		{Value: "only_one", Source: VarSourceLocal},
+	}
+
+	result, err := vm.ExecuteWithCaptures(chunk, "", nil, captures)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Should return empty string for missing capture
+	if result != "" {
+		t.Errorf("Expected empty for missing capture, got %q", result)
+	}
+}
