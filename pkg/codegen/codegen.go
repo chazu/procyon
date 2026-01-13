@@ -483,6 +483,55 @@ func (g *generator) generateHelpers(f *jen.File) {
 	)
 	f.Line()
 
+	// getInstanceVar - gets an instance variable by name from the database
+	// This is used for inherited instance variables that aren't in the Go struct
+	f.Func().Id("getInstanceVar").Params(
+		jen.Id("instanceID").String(),
+		jen.Id("fieldName").String(),
+	).String().Block(
+		// Open database
+		jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Defer().Id("db").Dot("Close").Call(),
+		// Query the field value using SQLite JSON extraction
+		jen.Var().Id("value").String(),
+		jen.Err().Op("=").Id("db").Dot("QueryRow").Call(
+			jen.Lit("SELECT json_extract(data, '$.' || ?) FROM instances WHERE id = ?"),
+			jen.Id("fieldName"),
+			jen.Id("instanceID"),
+		).Dot("Scan").Call(jen.Op("&").Id("value")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Return(jen.Id("value")),
+	)
+	f.Line()
+
+	// setInstanceVar - sets an instance variable by name in the database
+	// This is used for inherited instance variables that aren't in the Go struct
+	f.Func().Id("setInstanceVar").Params(
+		jen.Id("instanceID").String(),
+		jen.Id("fieldName").String(),
+		jen.Id("value").String(),
+	).Block(
+		// Open database
+		jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(),
+		),
+		jen.Defer().Id("db").Dot("Close").Call(),
+		// Update the field value using SQLite JSON_SET
+		jen.List(jen.Id("_"), jen.Id("_")).Op("=").Id("db").Dot("Exec").Call(
+			jen.Lit("UPDATE instances SET data = json_set(data, '$.' || ?, ?) WHERE id = ?"),
+			jen.Id("fieldName"),
+			jen.Id("value"),
+			jen.Id("instanceID"),
+		),
+	)
+	f.Line()
+
 	// sendMessage - shell out to bash runtime for non-self message sends
 	// Returns just string - errors are silently ignored to match bash behavior and simplify usage in expressions
 	f.Func().Id("sendMessage").Params(
@@ -1314,6 +1363,30 @@ func (g *generator) generateStatement(stmt parser.Statement, m *compiledMethod) 
 			}
 			return []jen.Code{jen.Id("c").Dot(capitalize(target)).Op("=").Add(expr)}
 		}
+		// Check if target is a local variable declared in the method
+		isLocalVar := false
+		if m.body != nil {
+			for _, local := range m.body.LocalVars {
+				if local == target {
+					isLocalVar = true
+					break
+				}
+			}
+		}
+		// Check if it's a renamed variable (also a local)
+		if _, ok := m.renamedVars[target]; ok {
+			isLocalVar = true
+		}
+		// Check for inherited instance variable assignment
+		if !isLocalVar && !m.isClass && g.class.Parent != "" && g.class.Parent != "Object" {
+			// Use setInstanceVar for inherited ivar
+			expr := g.generateExpr(s.Value, m)
+			return []jen.Code{jen.Id("setInstanceVar").Call(
+				jen.Id("instanceID"),
+				jen.Lit(target),
+				jen.Id("_toStr").Call(expr),
+			)}
+		}
 		// For local variables
 		expr := g.generateExpr(s.Value, m)
 		// Check if target was renamed to avoid Go builtin conflict
@@ -1907,6 +1980,20 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 		// Check if this variable was renamed to avoid Go builtin conflict
 		if renamed, ok := m.renamedVars[name]; ok {
 			return jen.Id(renamed)
+		}
+		// Check if it's a local variable declared in the method
+		if m.body != nil {
+			for _, local := range m.body.LocalVars {
+				if local == name {
+					return jen.Id(name)
+				}
+			}
+		}
+		// Check for inherited instance variable (class has parent, not a known local/param)
+		// In Trashtalk, unknown variables in subclasses are inherited ivars from parent
+		if !m.isClass && g.class.Parent != "" && g.class.Parent != "Object" {
+			// Use runtime lookup for inherited ivar
+			return jen.Id("getInstanceVar").Call(jen.Id("instanceID"), jen.Lit(name))
 		}
 		return jen.Id(name)
 

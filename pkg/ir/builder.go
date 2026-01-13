@@ -498,7 +498,18 @@ func (b *Builder) buildIdentifier(id *parser.Identifier, scope *Scope) (Expressi
 		}, BackendAny, ""
 	}
 
-	// Unknown variable - might be a global or error
+	// Unknown variable - check if class has parent (might be inherited ivar)
+	// In Trashtalk, variable access is essentially a slot lookup on self,
+	// so unknown vars in a subclass are likely inherited instance variables.
+	if b.class.Parent != "" && b.class.Parent != "Object" {
+		return &VarRefExpr{
+			Name:  id.Name,
+			Kind:  VarIVar,
+			Type_: TypeAny,
+		}, BackendAny, ""
+	}
+
+	// Root class or no parent - treat as local variable (might be a typo/error)
 	return &VarRefExpr{
 		Name:  id.Name,
 		Kind:  VarLocal,
