@@ -3,8 +3,10 @@ package parser
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/chazu/procyon/pkg/ast"
+	"github.com/chazu/procyon/pkg/lexer"
 )
 
 // Expr represents an expression in the parsed method body.
@@ -1162,7 +1164,31 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return nil, fmt.Errorf("bash variable references ($var) not supported")
 
 	case ast.TokenSubshell:
-		return nil, fmt.Errorf("subshell expressions not supported")
+		// Check if subshell contains a message send: $(@ receiver message)
+		// In native code, message sends return values directly, so we can
+		// strip the $() wrapper and just parse the message send.
+		subshellContent := tok.Value
+		if len(subshellContent) > 4 && subshellContent[:2] == "$(" && subshellContent[len(subshellContent)-1] == ')' {
+			inner := strings.TrimSpace(subshellContent[2 : len(subshellContent)-1]) // strip $( and )
+			// Check if it starts with @ (message send)
+			if len(inner) > 0 && inner[0] == '@' {
+				// It's a message send - re-lex and parse the inner content
+				p.advance() // consume the subshell token
+				lex := lexer.New(inner)
+				tokens, err := lex.Tokenize()
+				if err != nil {
+					return nil, fmt.Errorf("failed to lex subshell content: %w", err)
+				}
+				// Convert lexer tokens to ast tokens
+				astTokens := make([]ast.Token, len(tokens))
+				for i, t := range tokens {
+					astTokens[i] = ast.Token{Type: string(t.Type), Value: t.Value, Line: t.Line, Col: t.Column}
+				}
+				innerParser := &Parser{tokens: astTokens, pos: 0}
+				return innerParser.parseExpr()
+			}
+		}
+		return nil, fmt.Errorf("subshell expressions not supported (only $(@ ...) message sends allowed)")
 
 	case ast.TokenAt:
 		p.advance() // consume @
