@@ -323,6 +323,58 @@ func (g *generator) generateSharedPluginHelpers(f *jen.File) {
 	)
 	f.Line()
 
+	// sendMessageDirect - uses shared runtime's TT_SendDirect with instance pointer
+	f.Comment("// sendMessageDirect sends a message using direct instance pointer (faster than sendMessage)")
+	f.Func().Id("sendMessageDirect").Params(
+		jen.Id("inst").Op("*").Qual("C", "TTInstance"),
+		jen.Id("selector").String(),
+		jen.Id("args").Op("...").Interface(),
+	).String().Block(
+		// Convert to C strings
+		jen.Id("cSelector").Op(":=").Qual("C", "CString").Call(jen.Id("selector")),
+		jen.Defer().Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cSelector"))),
+
+		// Build args array
+		jen.Id("cArgs").Op(":=").Make(jen.Index().Qual("C", "TTValue"), jen.Len(jen.Id("args"))),
+		jen.For(jen.List(jen.Id("i"), jen.Id("arg")).Op(":=").Range().Id("args")).Block(
+			jen.Id("argStr").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("arg")),
+			jen.Id("cStr").Op(":=").Qual("C", "CString").Call(jen.Id("argStr")),
+			jen.Id("cArgs").Index(jen.Id("i")).Op("=").Qual("C", "TT_MakeString").Call(jen.Id("cStr")),
+		),
+
+		// Call TT_SendDirect
+		jen.Var().Id("argsPtr").Op("*").Qual("C", "TTValue"),
+		jen.If(jen.Len(jen.Id("cArgs")).Op(">").Lit(0)).Block(
+			jen.Id("argsPtr").Op("=").Op("&").Id("cArgs").Index(jen.Lit(0)),
+		),
+		jen.Id("result").Op(":=").Qual("C", "TT_SendDirect").Call(
+			jen.Id("inst"),
+			jen.Id("cSelector"),
+			jen.Id("argsPtr"),
+			jen.Qual("C", "int").Call(jen.Len(jen.Id("args"))),
+		),
+
+		// Convert result to Go string
+		jen.Id("cResult").Op(":=").Qual("C", "TT_ValueAsString").Call(jen.Id("result")),
+		jen.If(jen.Id("cResult").Op("==").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Defer().Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cResult"))),
+		jen.Return(jen.Qual("C", "GoString").Call(jen.Id("cResult"))),
+	)
+	f.Line()
+
+	// lookupInstance - gets a TTInstance pointer from an ID
+	f.Comment("// lookupInstance retrieves an instance pointer from the shared runtime")
+	f.Func().Id("lookupInstance").Params(
+		jen.Id("instanceID").String(),
+	).Op("*").Qual("C", "TTInstance").Block(
+		jen.Id("cID").Op(":=").Qual("C", "CString").Call(jen.Id("instanceID")),
+		jen.Defer().Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cID"))),
+		jen.Return(jen.Qual("C", "TT_Lookup").Call(jen.Id("cID"))),
+	)
+	f.Line()
+
 	// invokeBlock - uses shared runtime's TT_InvokeBlock
 	f.Comment("// invokeBlock calls a Trashtalk block through the shared runtime")
 	f.Func().Id("invokeBlock").Params(

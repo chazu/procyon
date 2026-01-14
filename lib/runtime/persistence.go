@@ -205,6 +205,60 @@ func valueFromInterface(v interface{}) Value {
 	}
 }
 
+// instanceFromJSONNoID parses JSON to create an instance without persistence
+// Used when persistence is disabled
+func instanceFromJSONNoID(jsonStr string, objSpace *ObjectSpace) (*Instance, error) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		return nil, fmt.Errorf("parsing instance JSON: %w", err)
+	}
+
+	className, _ := raw["class"].(string)
+	if className == "" {
+		return nil, fmt.Errorf("instance missing class")
+	}
+
+	// Generate an ID if not present
+	id, _ := raw["id"].(string)
+	if id == "" {
+		id = objSpace.GenerateID(className)
+	}
+
+	// Get class (may be nil if not registered)
+	class := objSpace.GetClass(className)
+
+	inst := &Instance{
+		ID:        id,
+		Class:     class,
+		ClassName: className,
+		Vars:      make(map[string]Value),
+	}
+
+	// Extract _vars list
+	var varNames []string
+	if vars, ok := raw["_vars"].([]interface{}); ok {
+		for _, v := range vars {
+			if s, ok := v.(string); ok {
+				varNames = append(varNames, s)
+			}
+		}
+	}
+
+	// Load instance variables
+	for _, name := range varNames {
+		if val, ok := raw[name]; ok {
+			inst.Vars[name] = valueFromInterface(val)
+		} else {
+			inst.Vars[name] = NilValue()
+		}
+	}
+
+	// Register in object space
+	objSpace.RegisterInstance(inst)
+
+	return inst, nil
+}
+
 // Delete removes an instance from the database
 func (p *Persistence) Delete(id string) error {
 	p.mu.Lock()

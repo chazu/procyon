@@ -163,6 +163,11 @@ extern TTValue TT_MakeBool(int b);
 extern char* TT_ValueAsString(TTValue val);
 extern int64_t TT_ValueAsInt(TTValue val);
 extern char* TT_ValueToJSON(TTValue val);
+extern char* TT_Serialize(TTInstance* inst);
+extern TTInstance* TT_Deserialize(char* jsonStr);
+extern char* TT_GetInstanceID(TTInstance* inst);
+extern char* TT_GetInstanceClass(TTInstance* inst);
+extern TTValue TT_MakeInstance(TTInstance* inst);
 extern char* TT_GetLastError();
 
 #ifdef __cplusplus

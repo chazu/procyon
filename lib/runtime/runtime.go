@@ -191,6 +191,15 @@ func (r *Runtime) Load(id string) (*Instance, error) {
 	return r.Persistence.Load(id)
 }
 
+// DeserializeInstance creates or updates an instance from JSON
+func (r *Runtime) DeserializeInstance(jsonStr string) (*Instance, error) {
+	if r.Persistence != nil {
+		return r.Persistence.instanceFromJSON("", jsonStr)
+	}
+	// Fall back to creating a new instance from JSON without persistence
+	return instanceFromJSONNoID(jsonStr, r.OS)
+}
+
 // Stats returns runtime statistics
 func (r *Runtime) Stats() RuntimeStats {
 	return RuntimeStats{

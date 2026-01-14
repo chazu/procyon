@@ -101,9 +101,12 @@ func (b *BashBackend) generateHeader() {
 // generateMetadata writes class metadata variables
 func (b *BashBackend) generateMetadata() {
 	className := b.className()
+	// Reconstruct qualified parent name if ParentPackage is set
 	parent := b.prog.Parent
 	if parent == "" {
 		parent = "nil"
+	} else if b.prog.ParentPackage != "" {
+		parent = b.prog.ParentPackage + "::" + parent
 	}
 
 	// Instance vars in "name:default" format

@@ -235,6 +235,29 @@ extern const char* TT_BashFallback(
 
 
 /* ============================================================================
+ * Serialization (Bash Boundary)
+ * ============================================================================ */
+
+/* Serialize an instance to JSON.
+ * Used when passing objects to Bash.
+ * Returns: JSON string (caller must free)
+ */
+extern const char* TT_Serialize(TTInstance* inst);
+
+/* Deserialize JSON to an instance.
+ * Used when receiving objects from Bash.
+ * Returns: Instance pointer or NULL
+ */
+extern TTInstance* TT_Deserialize(const char* jsonStr);
+
+/* Get instance ID */
+extern const char* TT_GetInstanceID(TTInstance* inst);
+
+/* Get instance class name */
+extern const char* TT_GetInstanceClass(TTInstance* inst);
+
+
+/* ============================================================================
  * Value Helpers
  * ============================================================================ */
 
@@ -244,6 +267,7 @@ extern TTValue TT_MakeInt(int64_t n);
 extern TTValue TT_MakeFloat(double f);
 extern TTValue TT_MakeString(const char* s);
 extern TTValue TT_MakeBool(int b);
+extern TTValue TT_MakeInstance(TTInstance* inst);
 
 /* Extract values */
 extern const char* TT_ValueAsString(TTValue val);

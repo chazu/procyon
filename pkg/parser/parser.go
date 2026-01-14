@@ -1118,14 +1118,22 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return &Identifier{Name: tok.Value}, nil
 
 	case ast.TokenDString, ast.TokenSString:
-		// jq-compiler already strips quotes from SSTRING/DSTRING values
+		// Strip quotes from string literals - tokenizer includes them
 		p.advance()
-		return &StringLit{Value: tok.Value}, nil
+		val := tok.Value
+		if len(val) >= 2 && ((val[0] == '\'' && val[len(val)-1] == '\'') || (val[0] == '"' && val[len(val)-1] == '"')) {
+			val = val[1 : len(val)-1]
+		}
+		return &StringLit{Value: val}, nil
 
 	case ast.TokenTripleString:
-		// Triple-quoted strings - value is already stripped of quotes
+		// Strip quotes from triple-quoted strings
 		p.advance()
-		return &StringLit{Value: tok.Value}, nil
+		val := tok.Value
+		if len(val) >= 6 && val[:3] == "'''" && val[len(val)-3:] == "'''" {
+			val = val[3 : len(val)-3]
+		}
+		return &StringLit{Value: val}, nil
 
 	case "STRING":
 		// STRING tokens from other sources may still have quotes
@@ -1301,14 +1309,22 @@ func (p *Parser) parseMessageArg() (Expr, error) {
 		return &Identifier{Name: tok.Value}, nil
 
 	case ast.TokenDString, ast.TokenSString:
-		// jq-compiler already strips quotes from SSTRING/DSTRING values
+		// Strip quotes from string literals - tokenizer includes them
 		p.advance()
-		return &StringLit{Value: tok.Value}, nil
+		val := tok.Value
+		if len(val) >= 2 && ((val[0] == '\'' && val[len(val)-1] == '\'') || (val[0] == '"' && val[len(val)-1] == '"')) {
+			val = val[1 : len(val)-1]
+		}
+		return &StringLit{Value: val}, nil
 
 	case ast.TokenTripleString:
-		// Triple-quoted strings - value is already stripped of quotes
+		// Strip quotes from triple-quoted strings
 		p.advance()
-		return &StringLit{Value: tok.Value}, nil
+		val := tok.Value
+		if len(val) >= 6 && val[:3] == "'''" && val[len(val)-3:] == "'''" {
+			val = val[3 : len(val)-3]
+		}
+		return &StringLit{Value: val}, nil
 
 	case "STRING":
 		// STRING tokens from other sources may still have quotes

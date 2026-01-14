@@ -484,6 +484,62 @@ func TT_ValueToJSON(val C.TTValue) *C.char {
 	return C.CString(goVal.ToJSON())
 }
 
+// ============================================================================
+// Serialization (for bash boundary)
+// ============================================================================
+
+//export TT_Serialize
+func TT_Serialize(inst *C.TTInstance) *C.char {
+	if inst == nil {
+		return nil
+	}
+	goInst := (*runtime.Instance)(unsafe.Pointer(inst))
+	return C.CString(goInst.ToJSON())
+}
+
+//export TT_Deserialize
+func TT_Deserialize(jsonStr *C.char) *C.TTInstance {
+	r := runtime.GlobalRuntime()
+	if r == nil || jsonStr == nil {
+		return nil
+	}
+
+	// Parse JSON to extract class and create/update instance
+	inst, err := r.DeserializeInstance(C.GoString(jsonStr))
+	if err != nil {
+		return nil
+	}
+
+	return (*C.TTInstance)(unsafe.Pointer(inst))
+}
+
+//export TT_GetInstanceID
+func TT_GetInstanceID(inst *C.TTInstance) *C.char {
+	if inst == nil {
+		return nil
+	}
+	goInst := (*runtime.Instance)(unsafe.Pointer(inst))
+	return C.CString(goInst.ID)
+}
+
+//export TT_GetInstanceClass
+func TT_GetInstanceClass(inst *C.TTInstance) *C.char {
+	if inst == nil {
+		return nil
+	}
+	goInst := (*runtime.Instance)(unsafe.Pointer(inst))
+	return C.CString(goInst.ClassName)
+}
+
+//export TT_MakeInstance
+func TT_MakeInstance(inst *C.TTInstance) C.TTValue {
+	if inst == nil {
+		return valueToC(runtime.NilValue())
+	}
+	goInst := (*runtime.Instance)(unsafe.Pointer(inst))
+	return valueToC(runtime.InstanceValue(goInst))
+}
+
 //export TT_GetLastError
 func TT_GetLastError() *C.char {
 	return nil

@@ -106,9 +106,8 @@ func (os *ObjectSpace) NewInstance(className string) (*Instance, error) {
 		return nil, fmt.Errorf("unknown class: %s", className)
 	}
 
-	// Generate instance ID: lowercase class name + UUID
-	idPrefix := strings.ToLower(strings.ReplaceAll(className, "::", "_"))
-	id := idPrefix + "_" + uuid.New().String()
+	// Generate unique instance ID
+	id := os.GenerateID(className)
 
 	inst := &Instance{
 		ID:        id,
@@ -301,4 +300,10 @@ func (os *ObjectSpace) ClassCount() int {
 	os.classMu.RLock()
 	defer os.classMu.RUnlock()
 	return len(os.classes)
+}
+
+// GenerateID creates a new unique instance ID for the given class name
+func (os *ObjectSpace) GenerateID(className string) string {
+	idPrefix := strings.ToLower(strings.ReplaceAll(className, "::", "_"))
+	return idPrefix + "_" + uuid.New().String()
 }
