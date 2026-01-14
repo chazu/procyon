@@ -1,6 +1,6 @@
 // trashtalk-daemon - Dynamic plugin loader for Trashtalk
 //
-// This daemon loads c-shared plugins (.dylib/.so) on demand and handles
+// This daemon initializes the shared runtime (libtrashtalk) and handles
 // method dispatch via Unix socket or stdin/stdout JSON protocol.
 //
 // Build: go build ./cmd/trashtalk-daemon
@@ -10,9 +10,28 @@
 //   trashtalk-daemon --socket /tmp/trashtalk.sock --idle-timeout 300
 package main
 
+/*
+#cgo CFLAGS: -I${SRCDIR}/../../lib/runtime
+#cgo LDFLAGS: -L${SRCDIR}/../../bin -ltrashtalk
+#cgo LDFLAGS: -ldl
+
+#include <libtrashtalk.h>
+#include <stdlib.h>
+#include <dlfcn.h>
+
+// Helper to load a plugin (triggers its init() which registers with runtime)
+static void* load_plugin(const char* path) {
+    return dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+}
+
+static const char* load_error() {
+    return dlerror();
+}
+*/
+import "C"
+
 import (
 	"bufio"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,27 +42,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
-
-	"github.com/chazu/procyon/pkg/bytecode"
-	"github.com/jamesits/goinvoke"
 )
-
-// PluginFuncs holds the exported functions from a c-shared plugin
-type PluginFuncs struct {
-	GetClassName *goinvoke.Proc `func:"GetClassName"`
-	Dispatch     *goinvoke.Proc `func:"Dispatch"`
-}
-
-// Plugin represents a loaded class plugin
-type Plugin struct {
-	funcs     *PluginFuncs
-	className string
-	path      string
-}
 
 // Request is the JSON request from Bash
 type Request struct {
@@ -71,26 +73,14 @@ type Response struct {
 	BlockData string `json:"block_data,omitempty"`
 }
 
-// RegisteredBlock holds a compiled block and its captures for invocation
-type RegisteredBlock struct {
-	Chunk    *bytecode.Chunk
-	Captures []*bytecode.CaptureCell
-}
-
-// Daemon manages plugin loading and dispatch
+// Daemon manages plugin loading and dispatch via the shared runtime
 type Daemon struct {
-	plugins     map[string]*Plugin // className -> plugin
-	pluginDir   string
-	mu          sync.RWMutex
-	idleTimeout time.Duration
-	idleTimer   *time.Timer
-	timerMu     sync.Mutex
-
-	// Bytecode block management
-	blockRegistry map[string]*RegisteredBlock
-	blockMu       sync.RWMutex
-	blockCounter  uint64
-	vm            *bytecode.VM
+	pluginDir     string
+	loadedPlugins map[string]bool // Track which plugins we've loaded
+	mu            sync.RWMutex
+	idleTimeout   time.Duration
+	idleTimer     *time.Timer
+	timerMu       sync.Mutex
 }
 
 var (
@@ -98,6 +88,7 @@ var (
 	socketPath  = flag.String("socket", "", "Unix socket path (enables socket mode)")
 	idleTimeout = flag.Int("idle-timeout", 300, "Idle timeout in seconds (socket mode only, 0 = no timeout)")
 	debug       = flag.Bool("debug", false, "Enable debug output to stderr")
+	dbPath      = flag.String("db", "", "SQLite database path (default: ~/.trashtalk/instances.db)")
 )
 
 func main() {
@@ -110,16 +101,32 @@ func main() {
 		dir = filepath.Join(home, ".trashtalk", "trash", ".compiled")
 	}
 
-	d := &Daemon{
-		plugins:       make(map[string]*Plugin),
-		pluginDir:     dir,
-		idleTimeout:   time.Duration(*idleTimeout) * time.Second,
-		blockRegistry: make(map[string]*RegisteredBlock),
-		vm:            bytecode.NewVM(),
+	// Initialize the shared runtime
+	var cDbPath *C.char
+	if *dbPath != "" {
+		cDbPath = C.CString(*dbPath)
+		defer C.free(unsafe.Pointer(cDbPath))
 	}
 
 	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: initializing shared runtime\n")
+	}
+
+	if C.TT_Init(cDbPath, nil) != 0 {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: failed to initialize shared runtime\n")
+		os.Exit(1)
+	}
+	defer C.TT_Close()
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: shared runtime initialized\n")
 		fmt.Fprintf(os.Stderr, "trashtalk-daemon: plugin-dir=%s\n", dir)
+	}
+
+	d := &Daemon{
+		pluginDir:     dir,
+		loadedPlugins: make(map[string]bool),
+		idleTimeout:   time.Duration(*idleTimeout) * time.Second,
 	}
 
 	if *socketPath != "" {
@@ -299,9 +306,8 @@ func (d *Daemon) HandleRequest(req Request) Response {
 		return d.handleBlockOp(req)
 	}
 
-	// Load plugin on demand
-	plugin, err := d.LoadPlugin(req.Class)
-	if err != nil {
+	// Ensure the plugin for this class is loaded
+	if err := d.ensurePluginLoaded(req.Class); err != nil {
 		if *debug {
 			fmt.Fprintf(os.Stderr, "trashtalk-daemon: no plugin for %s: %v\n", req.Class, err)
 		}
@@ -309,50 +315,82 @@ func (d *Daemon) HandleRequest(req Request) Response {
 		return Response{ExitCode: 200}
 	}
 
-	// Convert args to JSON
-	argsJSON, _ := json.Marshal(req.Args)
-
-	// Call plugin's Dispatch function - returns JSON with embedded exit_code
-	result := d.callDispatch(plugin, req.Instance, req.Selector, string(argsJSON))
-
-	if result == "" {
-		return Response{ExitCode: 1, Error: "empty response from plugin"}
+	// Determine the receiver - either instance ID or class name
+	receiver := req.Instance
+	if receiver == "" {
+		receiver = req.Class
 	}
 
-	// Parse result JSON from plugin
-	// The plugin returns: {"instance":{...},"result":"value","exit_code":0}
-	var resultData struct {
-		Instance json.RawMessage `json:"instance"`
-		Result   string          `json:"result"`
-		ExitCode int             `json:"exit_code"`
-		Error    string          `json:"error"`
+	// Build arguments for TT_Send
+	cReceiver := C.CString(receiver)
+	defer C.free(unsafe.Pointer(cReceiver))
+
+	cSelector := C.CString(req.Selector)
+	defer C.free(unsafe.Pointer(cSelector))
+
+	// Convert args to TTValue array
+	var argsPtr *C.TTValue
+	cArgs := make([]C.TTValue, len(req.Args))
+	cArgStrings := make([]*C.char, len(req.Args)) // Keep references to free later
+
+	for i, arg := range req.Args {
+		cArgStrings[i] = C.CString(arg)
+		cArgs[i] = C.TT_MakeString(cArgStrings[i])
 	}
-	if err := json.Unmarshal([]byte(result), &resultData); err != nil {
-		return Response{ExitCode: 1, Error: "invalid JSON from plugin: " + err.Error()}
+	defer func() {
+		for _, cStr := range cArgStrings {
+			C.free(unsafe.Pointer(cStr))
+		}
+	}()
+
+	if len(cArgs) > 0 {
+		argsPtr = &cArgs[0]
 	}
 
-	if resultData.ExitCode == 200 {
-		return Response{ExitCode: 200}
+	// Call TT_Send through the shared runtime
+	result := C.TT_Send(cReceiver, cSelector, argsPtr, C.int(len(req.Args)))
+
+	// Check result type for errors
+	if result._type == C.TT_TYPE_ERROR {
+		// Extract error message
+		cErrMsg := C.TT_ValueAsString(result)
+		if cErrMsg != nil {
+			errMsg := C.GoString(cErrMsg)
+			C.free(unsafe.Pointer(cErrMsg))
+			if strings.Contains(errMsg, "unknown selector") {
+				return Response{ExitCode: 200} // Signal fallback to Bash
+			}
+			return Response{ExitCode: 1, Error: errMsg}
+		}
+		return Response{ExitCode: 1, Error: "unknown error"}
 	}
 
-	if resultData.ExitCode != 0 {
-		return Response{ExitCode: resultData.ExitCode, Error: resultData.Error}
+	// Convert result to string
+	cResultStr := C.TT_ValueAsString(result)
+	var resultStr string
+	if cResultStr != nil {
+		resultStr = C.GoString(cResultStr)
+		C.free(unsafe.Pointer(cResultStr))
+	}
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: TT_Send result: %q\n", resultStr)
 	}
 
 	return Response{
-		Instance: string(resultData.Instance),
-		Result:   resultData.Result,
+		Result:   resultStr,
 		ExitCode: 0,
 	}
 }
 
-// LoadPlugin loads a class plugin, caching for subsequent calls
-func (d *Daemon) LoadPlugin(className string) (*Plugin, error) {
+// ensurePluginLoaded loads the plugin for a class if not already loaded
+func (d *Daemon) ensurePluginLoaded(className string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if p, ok := d.plugins[className]; ok {
-		return p, nil // Already loaded
+	// Check if already loaded
+	if d.loadedPlugins[className] {
+		return nil
 	}
 
 	// Determine shared library extension
@@ -361,92 +399,36 @@ func (d *Daemon) LoadPlugin(className string) (*Plugin, error) {
 		ext = ".dylib"
 	}
 
-	// Find and load shared library
-	soPath := filepath.Join(d.pluginDir, className+ext)
+	// Try to find and load the plugin
+	// Handle namespaced classes: MyApp::Counter -> MyApp__Counter
+	pluginName := strings.ReplaceAll(className, "::", "__")
+	soPath := filepath.Join(d.pluginDir, pluginName+ext)
+
 	if _, err := os.Stat(soPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("plugin not found: %s", soPath)
+		return fmt.Errorf("plugin not found: %s", soPath)
 	}
 
-	funcs := &PluginFuncs{}
-	if err := goinvoke.Unmarshal(soPath, funcs); err != nil {
-		return nil, fmt.Errorf("failed to load %s: %w", soPath, err)
-	}
+	// Load the plugin via dlopen - this triggers its init() which registers with the runtime
+	cPath := C.CString(soPath)
+	defer C.free(unsafe.Pointer(cPath))
 
-	// Verify plugin loaded correctly
-	if funcs.Dispatch == nil {
-		return nil, fmt.Errorf("plugin %s missing Dispatch function", soPath)
-	}
-
-	p := &Plugin{
-		funcs:     funcs,
-		className: className,
-		path:      soPath,
+	handle := C.load_plugin(cPath)
+	if handle == nil {
+		errMsg := C.GoString(C.load_error())
+		return fmt.Errorf("failed to load %s: %s", soPath, errMsg)
 	}
 
 	if *debug {
 		fmt.Fprintf(os.Stderr, "trashtalk-daemon: loaded plugin %s\n", soPath)
 	}
 
-	d.plugins[className] = p
-	return p, nil
-}
-
-// callDispatch calls the plugin's Dispatch function via FFI
-// The plugin returns a single JSON string with exit_code embedded to avoid struct return ABI issues
-func (d *Daemon) callDispatch(plugin *Plugin, instance, selector, argsJSON string) string {
-	// Convert Go strings to C strings (null-terminated)
-	instancePtr := cstring(instance)
-	selectorPtr := cstring(selector)
-	argsPtr := cstring(argsJSON)
-	defer freeStrings(instancePtr, selectorPtr, argsPtr)
-
-	// Call Dispatch(instanceJSON, selector, argsJSON) -> *char (JSON with embedded exit_code)
-	ret, _, _ := plugin.funcs.Dispatch.Call(
-		uintptr(instancePtr),
-		uintptr(selectorPtr),
-		uintptr(argsPtr),
-	)
-
-	// The return is a single char* pointer to JSON
-	return gostring(unsafe.Pointer(ret))
-}
-
-// cstring converts a Go string to a C string (null-terminated byte slice)
-// Returns an unsafe.Pointer that must be freed
-func cstring(s string) unsafe.Pointer {
-	b := append([]byte(s), 0)
-	return unsafe.Pointer(&b[0])
-}
-
-// gostring converts a C string pointer to a Go string
-func gostring(p unsafe.Pointer) string {
-	if p == nil {
-		return ""
-	}
-	// Find null terminator
-	var length int
-	for {
-		if *(*byte)(unsafe.Pointer(uintptr(p) + uintptr(length))) == 0 {
-			break
-		}
-		length++
-		if length > 1024*1024 { // Safety limit: 1MB
-			break
-		}
-	}
-	return string(unsafe.Slice((*byte)(p), length))
-}
-
-// freeStrings is a no-op since we're using Go-allocated memory
-// that will be GC'd. In a real implementation, we might need to
-// free C.CString allocations from the plugin side.
-func freeStrings(ptrs ...unsafe.Pointer) {
-	// Go-allocated strings are managed by GC
+	d.loadedPlugins[className] = true
+	return nil
 }
 
 // ============ Bytecode Block Operations ============
 
-// handleBlockOp processes bytecode block operations
+// handleBlockOp processes bytecode block operations via the shared runtime
 func (d *Daemon) handleBlockOp(req Request) Response {
 	switch req.BlockOp {
 	case "register":
@@ -454,60 +436,22 @@ func (d *Daemon) handleBlockOp(req Request) Response {
 	case "invoke":
 		return d.handleBlockInvoke(req)
 	case "serialize":
-		return d.handleBlockSerialize(req)
+		// Serialize is handled by the runtime - for now return error
+		return Response{ExitCode: 1, Error: "block serialize not yet implemented in shared runtime"}
 	default:
 		return Response{ExitCode: 1, Error: "unknown block operation: " + req.BlockOp}
 	}
 }
 
-// handleBlockRegister registers a new bytecode block
+// handleBlockRegister registers a new bytecode block with the shared runtime
 func (d *Daemon) handleBlockRegister(req Request) Response {
-	// Decode bytecode from hex
-	chunkData, err := hex.DecodeString(req.BlockData)
-	if err != nil {
-		return Response{ExitCode: 1, Error: "invalid bytecode hex: " + err.Error()}
-	}
-
-	// Deserialize the chunk
-	chunk, err := bytecode.Deserialize(chunkData)
-	if err != nil {
-		return Response{ExitCode: 1, Error: "failed to deserialize bytecode: " + err.Error()}
-	}
-
-	// Parse capture data if provided
-	var captures []*bytecode.CaptureCell
-	if req.BlockCaptures != "" {
-		var capData []struct {
-			Value      string `json:"value"`
-			Name       string `json:"name"`
-			Source     int    `json:"source"`
-			InstanceID string `json:"instance_id"`
-		}
-		if err := json.Unmarshal([]byte(req.BlockCaptures), &capData); err != nil {
-			return Response{ExitCode: 1, Error: "invalid captures JSON: " + err.Error()}
-		}
-		for _, cd := range capData {
-			captures = append(captures, &bytecode.CaptureCell{
-				Value:      cd.Value,
-				Name:       cd.Name,
-				Source:     bytecode.VarSource(cd.Source),
-				InstanceID: cd.InstanceID,
-			})
-		}
-	}
-
-	// Register the block
-	blockID := d.registerBlock(chunk, captures)
-
-	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: registered block %s (%d bytes, %d captures)\n",
-			blockID, len(chunkData), len(captures))
-	}
-
-	return Response{ExitCode: 0, BlockID: blockID}
+	// For now, we need to call into the shared runtime to register blocks
+	// This would require adding TT_RegisterBlock to the runtime API
+	// For backward compatibility, signal fallback to bash for now
+	return Response{ExitCode: 200}
 }
 
-// handleBlockInvoke invokes a registered bytecode block
+// handleBlockInvoke invokes a registered bytecode block via TT_InvokeBlock
 func (d *Daemon) handleBlockInvoke(req Request) Response {
 	// Parse arguments from BlockData
 	var args []string
@@ -517,90 +461,59 @@ func (d *Daemon) handleBlockInvoke(req Request) Response {
 		}
 	}
 
-	// Get the block
-	d.blockMu.RLock()
-	block, ok := d.blockRegistry[req.BlockID]
-	d.blockMu.RUnlock()
+	// Convert block ID to C string
+	cBlockID := C.CString(req.BlockID)
+	defer C.free(unsafe.Pointer(cBlockID))
 
-	if !ok {
-		// Check if this is a bytecode block prefix - if not, fall back to bash
-		if !strings.HasPrefix(req.BlockID, "bytecode_block_") {
-			return Response{ExitCode: 200} // Signal fallback to Bash
+	// Build args array
+	var argsPtr *C.TTValue
+	cArgs := make([]C.TTValue, len(args))
+	cArgStrings := make([]*C.char, len(args))
+
+	for i, arg := range args {
+		cArgStrings[i] = C.CString(arg)
+		cArgs[i] = C.TT_MakeString(cArgStrings[i])
+	}
+	defer func() {
+		for _, cStr := range cArgStrings {
+			C.free(unsafe.Pointer(cStr))
 		}
-		return Response{ExitCode: 1, Error: "block not found: " + req.BlockID}
+	}()
+
+	if len(cArgs) > 0 {
+		argsPtr = &cArgs[0]
 	}
 
-	// Execute the block
-	result, err := d.vm.ExecuteWithCaptures(block.Chunk, req.Instance, args, block.Captures)
-	if err != nil {
-		return Response{ExitCode: 1, Error: "block execution failed: " + err.Error()}
+	// Call TT_InvokeBlock
+	result := C.TT_InvokeBlock(cBlockID, argsPtr, C.int(len(args)))
+
+	// Check for errors
+	if result._type == C.TT_TYPE_ERROR {
+		cErrMsg := C.TT_ValueAsString(result)
+		if cErrMsg != nil {
+			errMsg := C.GoString(cErrMsg)
+			C.free(unsafe.Pointer(cErrMsg))
+			// Check if block not found - signal fallback
+			if strings.Contains(errMsg, "not found") {
+				return Response{ExitCode: 200}
+			}
+			return Response{ExitCode: 1, Error: errMsg}
+		}
+		return Response{ExitCode: 200} // Fallback if unknown error
+	}
+
+	// Convert result to string
+	cResultStr := C.TT_ValueAsString(result)
+	var resultStr string
+	if cResultStr != nil {
+		resultStr = C.GoString(cResultStr)
+		C.free(unsafe.Pointer(cResultStr))
 	}
 
 	if *debug {
 		fmt.Fprintf(os.Stderr, "trashtalk-daemon: invoked block %s with %d args -> %q\n",
-			req.BlockID, len(args), result)
+			req.BlockID, len(args), resultStr)
 	}
 
-	return Response{ExitCode: 0, Result: result}
-}
-
-// handleBlockSerialize exports a block for cross-process transfer
-func (d *Daemon) handleBlockSerialize(req Request) Response {
-	d.blockMu.RLock()
-	block, ok := d.blockRegistry[req.BlockID]
-	d.blockMu.RUnlock()
-
-	if !ok {
-		return Response{ExitCode: 1, Error: "block not found: " + req.BlockID}
-	}
-
-	// Serialize the chunk
-	data, err := block.Chunk.Serialize()
-	if err != nil {
-		return Response{ExitCode: 1, Error: "serialization failed: " + err.Error()}
-	}
-
-	// Serialize captures
-	var capData []struct {
-		Value      string `json:"value"`
-		Name       string `json:"name"`
-		Source     int    `json:"source"`
-		InstanceID string `json:"instance_id"`
-	}
-	for _, cap := range block.Captures {
-		capData = append(capData, struct {
-			Value      string `json:"value"`
-			Name       string `json:"name"`
-			Source     int    `json:"source"`
-			InstanceID string `json:"instance_id"`
-		}{
-			Value:      cap.Get(),
-			Name:       cap.Name,
-			Source:     int(cap.Source),
-			InstanceID: cap.InstanceID,
-		})
-	}
-	capturesJSON, _ := json.Marshal(capData)
-
-	return Response{
-		ExitCode:  0,
-		BlockData: hex.EncodeToString(data),
-		BlockID:   string(capturesJSON),
-	}
-}
-
-// registerBlock adds a block to the registry and returns its ID
-func (d *Daemon) registerBlock(chunk *bytecode.Chunk, captures []*bytecode.CaptureCell) string {
-	d.blockMu.Lock()
-	defer d.blockMu.Unlock()
-
-	id := atomic.AddUint64(&d.blockCounter, 1)
-	blockID := fmt.Sprintf("bytecode_block_%d", id)
-
-	d.blockRegistry[blockID] = &RegisteredBlock{
-		Chunk:    chunk,
-		Captures: captures,
-	}
-
-	return blockID
+	return Response{ExitCode: 0, Result: resultStr}
 }
