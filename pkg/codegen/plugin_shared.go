@@ -681,19 +681,19 @@ func (g *generator) generateGrpcHelpersShared(f *jen.File) {
 			jen.Return(jen.Id("c").Dot("conn"), jen.Nil()),
 		),
 		jen.Var().Id("opts").Index().Qual("google.golang.org/grpc", "DialOption"),
-		jen.If(jen.Id("c").Dot("UsePlaintext").Op("==").Lit("yes")).Block(
+		jen.If(jen.String().Call(jen.Id("c").Dot("UsePlaintext")).Op("==").Lit("yes")).Block(
 			jen.Id("opts").Op("=").Append(jen.Id("opts"), jen.Qual("google.golang.org/grpc", "WithTransportCredentials").Call(
 				jen.Qual("google.golang.org/grpc/credentials/insecure", "NewCredentials").Call(),
 			)),
 		),
 		jen.List(jen.Id("conn"), jen.Err()).Op(":=").Qual("google.golang.org/grpc", "NewClient").Call(
-			jen.Id("c").Dot("Address"),
+			jen.String().Call(jen.Id("c").Dot("Address")),
 			jen.Id("opts").Op("..."),
 		),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.Return(jen.Nil(), jen.Err()),
 		),
-		jen.If(jen.Id("c").Dot("PoolConnections").Op("==").Lit("yes")).Block(
+		jen.If(jen.String().Call(jen.Id("c").Dot("PoolConnections")).Op("==").Lit("yes")).Block(
 			jen.Id("c").Dot("conn").Op("=").Id("conn"),
 		),
 		jen.Return(jen.Id("conn"), jen.Nil()),
@@ -716,20 +716,20 @@ func (g *generator) generateGrpcHelpersShared(f *jen.File) {
 		jen.If(jen.Len(jen.Id("c").Dot("fileDescs")).Op(">").Lit(0)).Block(
 			jen.Return(jen.Nil()),
 		),
-		jen.If(jen.Id("c").Dot("ProtoFile").Op("==").Lit("")).Block(
+		jen.If(jen.String().Call(jen.Id("c").Dot("ProtoFile")).Op("==").Lit("")).Block(
 			jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("no proto file specified"))),
 		),
 		jen.Id("parser").Op(":=").Qual("github.com/jhump/protoreflect/desc/protoparse", "Parser").Values(jen.Dict{
 			jen.Id("ImportPaths"): jen.Index().String().Values(
-				jen.Qual("path/filepath", "Dir").Call(jen.Id("c").Dot("ProtoFile")),
+				jen.Qual("path/filepath", "Dir").Call(jen.String().Call(jen.Id("c").Dot("ProtoFile"))),
 				jen.Lit("."),
 			),
 		}),
 		jen.List(jen.Id("fds"), jen.Err()).Op(":=").Id("parser").Dot("ParseFiles").Call(
-			jen.Qual("path/filepath", "Base").Call(jen.Id("c").Dot("ProtoFile")),
+			jen.Qual("path/filepath", "Base").Call(jen.String().Call(jen.Id("c").Dot("ProtoFile"))),
 		),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
-			jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to parse proto file %s: %w"), jen.Id("c").Dot("ProtoFile"), jen.Err())),
+			jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to parse proto file %s: %w"), jen.String().Call(jen.Id("c").Dot("ProtoFile")), jen.Err())),
 		),
 		jen.Id("c").Dot("fileDescs").Op("=").Id("fds"),
 		jen.Return(jen.Nil()),
@@ -781,13 +781,13 @@ func (g *generator) generateGrpcHelpersShared(f *jen.File) {
 			jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Err()),
 		),
 		jen.Id("cleanup").Op(":=").Func().Params().Block(
-			jen.If(jen.Id("c").Dot("PoolConnections").Op("!=").Lit("yes")).Block(
+			jen.If(jen.String().Call(jen.Id("c").Dot("PoolConnections")).Op("!=").Lit("yes")).Block(
 				jen.Id("conn").Dot("Close").Call(),
 			),
 		),
 		jen.Id("ctx").Op(":=").Qual("context", "Background").Call(),
 		jen.Var().Id("mtdDesc").Op("*").Qual("github.com/jhump/protoreflect/desc", "MethodDescriptor"),
-		jen.If(jen.Id("c").Dot("UseReflection").Op("==").Lit("yes")).Block(
+		jen.If(jen.String().Call(jen.Id("c").Dot("UseReflection")).Op("==").Lit("yes")).Block(
 			jen.Id("refClient").Op(":=").Qual("github.com/jhump/protoreflect/grpcreflect", "NewClientAuto").Call(jen.Id("ctx"), jen.Id("conn")),
 			jen.Defer().Id("refClient").Dot("Reset").Call(),
 			jen.Id("parts").Op(":=").Qual("strings", "Split").Call(jen.Id("method"), jen.Lit("/")),

@@ -3450,7 +3450,7 @@ func (g *generator) generateGrpcClientMethod(f *jen.File, m *compiledMethod) boo
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
 			),
-			jen.If(jen.Id("c").Dot("PoolConnections").Op("!=").Lit("yes")).Block(
+			jen.If(jen.String().Call(jen.Id("c").Dot("PoolConnections")).Op("!=").Lit("yes")).Block(
 				jen.Defer().Id("conn").Dot("Close").Call(),
 			),
 			jen.Line(),
@@ -3479,7 +3479,7 @@ func (g *generator) generateGrpcClientMethod(f *jen.File, m *compiledMethod) boo
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
 			),
-			jen.If(jen.Id("c").Dot("PoolConnections").Op("!=").Lit("yes")).Block(
+			jen.If(jen.String().Call(jen.Id("c").Dot("PoolConnections")).Op("!=").Lit("yes")).Block(
 				jen.Defer().Id("conn").Dot("Close").Call(),
 			),
 			jen.Line(),
@@ -3526,19 +3526,19 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 			jen.Return(jen.Id("c").Dot("conn"), jen.Nil()),
 		),
 		jen.Var().Id("opts").Index().Qual("google.golang.org/grpc", "DialOption"),
-		jen.If(jen.Id("c").Dot("UsePlaintext").Op("==").Lit("yes")).Block(
+		jen.If(jen.String().Call(jen.Id("c").Dot("UsePlaintext")).Op("==").Lit("yes")).Block(
 			jen.Id("opts").Op("=").Append(jen.Id("opts"), jen.Qual("google.golang.org/grpc", "WithTransportCredentials").Call(
 				jen.Qual("google.golang.org/grpc/credentials/insecure", "NewCredentials").Call(),
 			)),
 		),
 		jen.List(jen.Id("conn"), jen.Err()).Op(":=").Qual("google.golang.org/grpc", "NewClient").Call(
-			jen.Id("c").Dot("Address"),
+			jen.String().Call(jen.Id("c").Dot("Address")),
 			jen.Id("opts").Op("..."),
 		),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
 			jen.Return(jen.Nil(), jen.Err()),
 		),
-		jen.If(jen.Id("c").Dot("PoolConnections").Op("==").Lit("yes")).Block(
+		jen.If(jen.String().Call(jen.Id("c").Dot("PoolConnections")).Op("==").Lit("yes")).Block(
 			jen.Id("c").Dot("conn").Op("=").Id("conn"),
 		),
 		jen.Return(jen.Id("conn"), jen.Nil()),
@@ -3561,22 +3561,22 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 		jen.If(jen.Len(jen.Id("c").Dot("fileDescs")).Op(">").Lit(0)).Block(
 			jen.Return(jen.Nil()), // Already loaded
 		),
-		jen.If(jen.Id("c").Dot("ProtoFile").Op("==").Lit("")).Block(
+		jen.If(jen.String().Call(jen.Id("c").Dot("ProtoFile")).Op("==").Lit("")).Block(
 			jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("no proto file specified"))),
 		),
 		jen.Line(),
 		jen.Id("parser").Op(":=").Qual("github.com/jhump/protoreflect/desc/protoparse", "Parser").Values(jen.Dict{
 			jen.Id("ImportPaths"): jen.Index().String().Values(
-				jen.Qual("path/filepath", "Dir").Call(jen.Id("c").Dot("ProtoFile")),
+				jen.Qual("path/filepath", "Dir").Call(jen.String().Call(jen.Id("c").Dot("ProtoFile"))),
 				jen.Lit("."),
 			),
 		}),
 		jen.Line(),
 		jen.List(jen.Id("fds"), jen.Err()).Op(":=").Id("parser").Dot("ParseFiles").Call(
-			jen.Qual("path/filepath", "Base").Call(jen.Id("c").Dot("ProtoFile")),
+			jen.Qual("path/filepath", "Base").Call(jen.String().Call(jen.Id("c").Dot("ProtoFile"))),
 		),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
-			jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to parse proto file %s: %w"), jen.Id("c").Dot("ProtoFile"), jen.Err())),
+			jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to parse proto file %s: %w"), jen.String().Call(jen.Id("c").Dot("ProtoFile")), jen.Err())),
 		),
 		jen.Line(),
 		jen.Id("c").Dot("fileDescs").Op("=").Id("fds"),
@@ -3643,7 +3643,7 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 		jen.Var().Id("refClient").Op("*").Qual("github.com/jhump/protoreflect/grpcreflect", "Client"),
 		jen.Line(),
 		// Branch based on proto file vs reflection mode
-		jen.If(jen.Id("c").Dot("ProtoFile").Op("!=").Lit("")).Block(
+		jen.If(jen.String().Call(jen.Id("c").Dot("ProtoFile")).Op("!=").Lit("")).Block(
 			// Proto file mode - parse file and find method
 			jen.If(jen.Err().Op(":=").Id("c").Dot("loadProtoFile").Call().Op(";").Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "Stub").Values(), jen.Nil(), jen.Err()),
@@ -3680,7 +3680,7 @@ func (g *generator) generateGrpcHelpers(f *jen.File) {
 			jen.If(jen.Id("refClient").Op("!=").Nil()).Block(
 				jen.Id("refClient").Dot("Reset").Call(),
 			),
-			jen.If(jen.Id("c").Dot("PoolConnections").Op("!=").Lit("yes")).Block(
+			jen.If(jen.String().Call(jen.Id("c").Dot("PoolConnections")).Op("!=").Lit("yes")).Block(
 				jen.Id("conn").Dot("Close").Call(),
 			),
 		),
