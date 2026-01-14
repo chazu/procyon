@@ -70,11 +70,8 @@ func main() {
 	}
 	class := unit.Class
 
-	// For plugin/shared modes, skip primitive classes entirely (they contain raw bash)
-	if (*mode == "plugin" || *mode == "shared") && class.IsPrimitiveClass() {
-		// Output nothing - the Makefile checks for empty output and skips
-		os.Exit(0)
-	}
+	// Note: primitiveClass classes are now handled by plugin/shared modes.
+	// They generate plugins using built-in implementations from primitiveRegistry.
 
 	// Validate primitiveClass constraint (must check after trait methods are merged)
 	if err := class.ValidatePrimitiveClass(); err != nil {

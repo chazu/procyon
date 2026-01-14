@@ -67,25 +67,13 @@ func (b *BashBackend) Generate(prog *ir.Program) (string, error) {
 }
 
 // validatePrimitiveClass checks that a class with pragma: primitiveClass
-// contains only primitive or raw methods.
+// does not have any invalid configurations. Method type validation is no
+// longer enforced since primitiveClass now allows any method type - the
+// class-level pragma is sufficient to indicate native implementations exist.
 func (b *BashBackend) validatePrimitiveClass() error {
-	if !b.prog.IsPrimitiveClass() {
-		return nil
-	}
-
-	// Collect non-primitive methods
-	var nonPrimitive []string
-	for _, m := range b.prog.Methods {
-		if !m.IsPrimitive && !m.IsRaw {
-			nonPrimitive = append(nonPrimitive, m.Selector)
-		}
-	}
-
-	if len(nonPrimitive) > 0 {
-		return fmt.Errorf("class '%s' has pragma: primitiveClass but contains non-primitive methods:\n  %s\nAll methods in a primitiveClass must use primitiveMethod:, primitiveClassMethod:, rawMethod:, or rawClassMethod:",
-			b.prog.Name, strings.Join(nonPrimitive, ", "))
-	}
-
+	// No validation currently required for primitiveClass in bash backend.
+	// The bash code in primitiveClass methods is typically simple bash that
+	// works with or without DSL transformation.
 	return nil
 }
 

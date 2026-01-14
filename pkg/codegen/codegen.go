@@ -901,12 +901,26 @@ func (g *generator) generateServeMode(f *jen.File) {
 // preIdentifySkippedMethods runs through all methods to identify which will be skipped.
 // This is needed so that @ self calls can use sendMessage for skipped methods.
 func (g *generator) preIdentifySkippedMethods() {
+	// Check if this is a primitiveClass - all methods use built-in implementations
+	isPrimitiveClass := g.class.IsPrimitiveClass()
+
 	for _, m := range g.class.Methods {
 		willSkip := false
 
 		// bashOnly pragma
 		if m.HasPragma("bashOnly") {
 			willSkip = true
+		}
+
+		// For primitiveClass, skip only if no native impl exists
+		if isPrimitiveClass {
+			if !hasPrimitiveImpl(g.class.Name, m.Selector) {
+				willSkip = true
+			}
+			if willSkip {
+				g.skippedMethods[m.Selector] = true
+			}
+			continue
 		}
 
 		// Raw methods (unless primitive or has procyon pragma)
@@ -947,6 +961,9 @@ func (g *generator) preIdentifySkippedMethods() {
 func (g *generator) compileMethods() []*compiledMethod {
 	var compiled []*compiledMethod
 
+	// Check if this is a primitiveClass - all methods use built-in implementations
+	isPrimitiveClass := g.class.IsPrimitiveClass()
+
 	for _, m := range g.class.Methods {
 		// Skip bashOnly methods - they should only run in Bash
 		if m.HasPragma("bashOnly") {
@@ -954,6 +971,33 @@ func (g *generator) compileMethods() []*compiledMethod {
 				Selector: m.Selector,
 				Reason:   "bashOnly pragma",
 			})
+			continue
+		}
+
+		// For primitiveClass, treat ALL methods as primitive - use built-in implementations
+		if isPrimitiveClass {
+			if hasPrimitiveImpl(g.class.Name, m.Selector) {
+				compiled = append(compiled, &compiledMethod{
+					selector:    m.Selector,
+					goName:      selectorToGoName(m.Selector),
+					args:        m.Args,
+					body:        nil, // No parsed body - native impl provided
+					hasReturn:   true,
+					isClass:     m.Kind == "class",
+					returnsErr:  true,
+					primitive:   true,
+					renamedVars: make(map[string]string),
+				})
+			} else {
+				// No native impl registered for this primitive class method
+				g.warnings = append(g.warnings,
+					fmt.Sprintf("primitiveClass %s method %s has no native implementation, will fall back to bash",
+						g.class.Name, m.Selector))
+				g.skipped = append(g.skipped, SkippedMethod{
+					Selector: m.Selector,
+					Reason:   "primitiveClass method without native implementation",
+				})
+			}
 			continue
 		}
 

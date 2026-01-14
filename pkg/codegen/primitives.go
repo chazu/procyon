@@ -223,6 +223,39 @@ var primitiveRegistry = map[string]map[string]bool{
 		"requiredMethods": true,
 		"isSatisfiedBy_":  true,
 	},
+	"Time": {
+		// Current time
+		"now":           true,
+		"nowMillis":     true,
+		"nowFormatted_": true,
+		"nowISO":        true,
+		// Formatting
+		"format_as_":      true,
+		"formatISO_":      true,
+		"formatRelative_": true,
+		// Parsing
+		"parse_format_": true,
+		// Delays
+		"sleep_":       true,
+		"sleepMillis_": true,
+		// Duration/Arithmetic
+		"since_":          true,
+		"from_to_":        true,
+		"add_to_":         true,
+		"subtract_from_":  true,
+		// Components
+		"yearOf_":    true,
+		"monthOf_":   true,
+		"dayOf_":     true,
+		"hourOf_":    true,
+		"minuteOf_":  true,
+		"secondOf_":  true,
+		"weekdayOf_": true,
+		// Convenience
+		"today":     true,
+		"tomorrow":  true,
+		"yesterday": true,
+	},
 }
 
 // hasPrimitiveImpl checks if a native implementation exists for a primitive method.
@@ -265,6 +298,8 @@ func (g *generator) generatePrimitiveMethod(f *jen.File, m *compiledMethod) bool
 		return g.generatePrimitiveMethodObject(f, m)
 	case "Protocol":
 		return g.generatePrimitiveMethodProtocol(f, m)
+	case "Time":
+		return g.generatePrimitiveMethodTime(f, m)
 	default:
 		return false
 	}
@@ -2603,6 +2638,482 @@ func (g *generator) generatePrimitiveMethodProtocol(f *jen.File, m *compiledMeth
 	case "isSatisfiedBy_":
 		// Requires runtime method introspection - fall back to bash
 		return false
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodTime generates native Time class methods.
+func (g *generator) generatePrimitiveMethodTime(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	// ==========================================
+	// Current Time
+	// ==========================================
+
+	case "now":
+		// Get current Unix timestamp (seconds since epoch)
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(
+					jen.Qual("time", "Now").Call().Dot("Unix").Call(),
+					jen.Lit(10),
+				),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "nowMillis":
+		// Get current time in milliseconds
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(
+					jen.Qual("time", "Now").Call().Dot("UnixMilli").Call(),
+					jen.Lit(10),
+				),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "nowFormatted_":
+		// Get current time formatted with strftime-like pattern
+		f.Func().Id(m.goName).Params(jen.Id("format").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Convert strftime format to Go format"),
+			jen.Id("goFormat").Op(":=").Qual("strings", "NewReplacer").Call(
+				jen.Lit("%Y"), jen.Lit("2006"),
+				jen.Lit("%m"), jen.Lit("01"),
+				jen.Lit("%d"), jen.Lit("02"),
+				jen.Lit("%H"), jen.Lit("15"),
+				jen.Lit("%M"), jen.Lit("04"),
+				jen.Lit("%S"), jen.Lit("05"),
+				jen.Lit("%b"), jen.Lit("Jan"),
+				jen.Lit("%B"), jen.Lit("January"),
+				jen.Lit("%a"), jen.Lit("Mon"),
+				jen.Lit("%A"), jen.Lit("Monday"),
+				jen.Lit("%p"), jen.Lit("PM"),
+				jen.Lit("%Z"), jen.Lit("MST"),
+				jen.Lit("%z"), jen.Lit("-0700"),
+				jen.Lit("%%"), jen.Lit("%"),
+			).Dot("Replace").Call(jen.Id("format")),
+			jen.Return(
+				jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Id("goFormat")),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "nowISO":
+		// Get ISO 8601 formatted current time
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(
+				jen.Qual("time", "Now").Call().Dot("UTC").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	// ==========================================
+	// Formatting
+	// ==========================================
+
+	case "format_as_":
+		// Format a Unix timestamp
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String(), jen.Id("format").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Comment("Convert strftime format to Go format"),
+			jen.Id("goFormat").Op(":=").Qual("strings", "NewReplacer").Call(
+				jen.Lit("%Y"), jen.Lit("2006"),
+				jen.Lit("%m"), jen.Lit("01"),
+				jen.Lit("%d"), jen.Lit("02"),
+				jen.Lit("%H"), jen.Lit("15"),
+				jen.Lit("%M"), jen.Lit("04"),
+				jen.Lit("%S"), jen.Lit("05"),
+				jen.Lit("%b"), jen.Lit("Jan"),
+				jen.Lit("%B"), jen.Lit("January"),
+				jen.Lit("%a"), jen.Lit("Mon"),
+				jen.Lit("%A"), jen.Lit("Monday"),
+				jen.Lit("%p"), jen.Lit("PM"),
+				jen.Lit("%Z"), jen.Lit("MST"),
+				jen.Lit("%z"), jen.Lit("-0700"),
+				jen.Lit("%%"), jen.Lit("%"),
+			).Dot("Replace").Call(jen.Id("format")),
+			jen.Return(
+				jen.Id("t").Dot("Format").Call(jen.Id("goFormat")),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "formatISO_":
+		// Format timestamp as ISO 8601
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Return(
+				jen.Id("t").Dot("UTC").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "formatRelative_":
+		// Format timestamp as human-readable relative time
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("diff").Op(":=").Qual("time", "Now").Call().Dot("Unix").Call().Op("-").Id("ts"),
+			jen.If(jen.Id("diff").Op("<").Lit(60)).Block(
+				jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%d seconds ago"), jen.Id("diff")), jen.Nil()),
+			).Else().If(jen.Id("diff").Op("<").Lit(3600)).Block(
+				jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%d minutes ago"), jen.Id("diff").Op("/").Lit(60)), jen.Nil()),
+			).Else().If(jen.Id("diff").Op("<").Lit(86400)).Block(
+				jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%d hours ago"), jen.Id("diff").Op("/").Lit(3600)), jen.Nil()),
+			).Else().Block(
+				jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%d days ago"), jen.Id("diff").Op("/").Lit(86400)), jen.Nil()),
+			),
+		)
+		f.Line()
+		return true
+
+	// ==========================================
+	// Parsing
+	// ==========================================
+
+	case "parse_format_":
+		// Parse a date string to Unix timestamp
+		f.Func().Id(m.goName).Params(jen.Id("dateString").String(), jen.Id("format").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Convert strftime format to Go format"),
+			jen.Id("goFormat").Op(":=").Qual("strings", "NewReplacer").Call(
+				jen.Lit("%Y"), jen.Lit("2006"),
+				jen.Lit("%m"), jen.Lit("01"),
+				jen.Lit("%d"), jen.Lit("02"),
+				jen.Lit("%H"), jen.Lit("15"),
+				jen.Lit("%M"), jen.Lit("04"),
+				jen.Lit("%S"), jen.Lit("05"),
+				jen.Lit("%b"), jen.Lit("Jan"),
+				jen.Lit("%B"), jen.Lit("January"),
+				jen.Lit("%a"), jen.Lit("Mon"),
+				jen.Lit("%A"), jen.Lit("Monday"),
+				jen.Lit("%p"), jen.Lit("PM"),
+				jen.Lit("%Z"), jen.Lit("MST"),
+				jen.Lit("%z"), jen.Lit("-0700"),
+				jen.Lit("%%"), jen.Lit("%"),
+			).Dot("Replace").Call(jen.Id("format")),
+			jen.List(jen.Id("t"), jen.Id("err")).Op(":=").Qual("time", "Parse").Call(
+				jen.Id("goFormat"),
+				jen.Id("dateString"),
+			),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Nil()), // Return empty string on parse failure (matches bash behavior)
+			),
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(jen.Id("t").Dot("Unix").Call(), jen.Lit(10)),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	// ==========================================
+	// Delays
+	// ==========================================
+
+	case "sleep_":
+		// Sleep for specified seconds (supports decimals)
+		f.Func().Id(m.goName).Params(jen.Id("seconds").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("secs"), jen.Id("err")).Op(":=").Qual("strconv", "ParseFloat").Call(jen.Id("seconds"), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Qual("time", "Sleep").Call(
+				jen.Qual("time", "Duration").Call(
+					jen.Id("secs").Op("*").Float64().Call(jen.Qual("time", "Second")),
+				),
+			),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "sleepMillis_":
+		// Sleep for specified milliseconds
+		f.Func().Id(m.goName).Params(jen.Id("millis").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ms"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("millis"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Qual("time", "Sleep").Call(
+				jen.Qual("time", "Duration").Call(jen.Id("ms")).Op("*").Qual("time", "Millisecond"),
+			),
+			jen.Return(jen.Lit(""), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	// ==========================================
+	// Duration/Arithmetic
+	// ==========================================
+
+	case "since_":
+		// Calculate duration since a timestamp
+		f.Func().Id(m.goName).Params(jen.Id("startTime").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("start"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("startTime"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("diff").Op(":=").Qual("time", "Now").Call().Dot("Unix").Call().Op("-").Id("start"),
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(jen.Id("diff"), jen.Lit(10)),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "from_to_":
+		// Calculate duration between two timestamps
+		f.Func().Id(m.goName).Params(jen.Id("startTime").String(), jen.Id("endTime").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("start"), jen.Id("err1")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("startTime"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err1").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err1")),
+			),
+			jen.List(jen.Id("end"), jen.Id("err2")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("endTime"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err2").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err2")),
+			),
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(jen.Id("end").Op("-").Id("start"), jen.Lit(10)),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "add_to_":
+		// Add seconds to a timestamp
+		f.Func().Id(m.goName).Params(jen.Id("seconds").String(), jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("secs"), jen.Id("err1")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("seconds"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err1").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err1")),
+			),
+			jen.List(jen.Id("ts"), jen.Id("err2")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err2").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err2")),
+			),
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(jen.Id("ts").Op("+").Id("secs"), jen.Lit(10)),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "subtract_from_":
+		// Subtract seconds from a timestamp
+		f.Func().Id(m.goName).Params(jen.Id("seconds").String(), jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("secs"), jen.Id("err1")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("seconds"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err1").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err1")),
+			),
+			jen.List(jen.Id("ts"), jen.Id("err2")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err2").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err2")),
+			),
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(jen.Id("ts").Op("-").Id("secs"), jen.Lit(10)),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	// ==========================================
+	// Components
+	// ==========================================
+
+	case "yearOf_":
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Return(
+				jen.Qual("strconv", "Itoa").Call(jen.Id("t").Dot("Year").Call()),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "monthOf_":
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Return(
+				jen.Qual("strconv", "Itoa").Call(jen.Int().Call(jen.Id("t").Dot("Month").Call())),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "dayOf_":
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Return(
+				jen.Qual("strconv", "Itoa").Call(jen.Id("t").Dot("Day").Call()),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "hourOf_":
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Return(
+				jen.Qual("strconv", "Itoa").Call(jen.Id("t").Dot("Hour").Call()),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "minuteOf_":
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Return(
+				jen.Qual("strconv", "Itoa").Call(jen.Id("t").Dot("Minute").Call()),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "secondOf_":
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Return(
+				jen.Qual("strconv", "Itoa").Call(jen.Id("t").Dot("Second").Call()),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "weekdayOf_":
+		// Returns 0=Sunday, 6=Saturday (matches bash date +%w)
+		f.Func().Id(m.goName).Params(jen.Id("timestamp").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("ts"), jen.Id("err")).Op(":=").Qual("strconv", "ParseInt").Call(jen.Id("timestamp"), jen.Lit(10), jen.Lit(64)),
+			jen.If(jen.Id("err").Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Id("err")),
+			),
+			jen.Id("t").Op(":=").Qual("time", "Unix").Call(jen.Id("ts"), jen.Lit(0)),
+			jen.Return(
+				jen.Qual("strconv", "Itoa").Call(jen.Int().Call(jen.Id("t").Dot("Weekday").Call())),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	// ==========================================
+	// Convenience
+	// ==========================================
+
+	case "today":
+		// Get timestamp for start of today
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("now").Op(":=").Qual("time", "Now").Call(),
+			jen.Id("today").Op(":=").Qual("time", "Date").Call(
+				jen.Id("now").Dot("Year").Call(),
+				jen.Id("now").Dot("Month").Call(),
+				jen.Id("now").Dot("Day").Call(),
+				jen.Lit(0), jen.Lit(0), jen.Lit(0), jen.Lit(0),
+				jen.Id("now").Dot("Location").Call(),
+			),
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(jen.Id("today").Dot("Unix").Call(), jen.Lit(10)),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "tomorrow":
+		// Get timestamp for start of tomorrow
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("now").Op(":=").Qual("time", "Now").Call(),
+			jen.Id("tomorrow").Op(":=").Qual("time", "Date").Call(
+				jen.Id("now").Dot("Year").Call(),
+				jen.Id("now").Dot("Month").Call(),
+				jen.Id("now").Dot("Day").Call().Op("+").Lit(1),
+				jen.Lit(0), jen.Lit(0), jen.Lit(0), jen.Lit(0),
+				jen.Id("now").Dot("Location").Call(),
+			),
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(jen.Id("tomorrow").Dot("Unix").Call(), jen.Lit(10)),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
+
+	case "yesterday":
+		// Get timestamp for start of yesterday
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("now").Op(":=").Qual("time", "Now").Call(),
+			jen.Id("yesterday").Op(":=").Qual("time", "Date").Call(
+				jen.Id("now").Dot("Year").Call(),
+				jen.Id("now").Dot("Month").Call(),
+				jen.Id("now").Dot("Day").Call().Op("-").Lit(1),
+				jen.Lit(0), jen.Lit(0), jen.Lit(0), jen.Lit(0),
+				jen.Id("now").Dot("Location").Call(),
+			),
+			jen.Return(
+				jen.Qual("strconv", "FormatInt").Call(jen.Id("yesterday").Dot("Unix").Call(), jen.Lit(10)),
+				jen.Nil(),
+			),
+		)
+		f.Line()
+		return true
 
 	default:
 		return false

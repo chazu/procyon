@@ -72,7 +72,9 @@ func (c *Class) IsPrimitiveClass() bool {
 }
 
 // ValidatePrimitiveClass checks that a class with pragma: primitiveClass
-// contains only primitive or raw methods and does not include traits.
+// does not include traits. Method type validation is no longer enforced
+// since primitiveClass methods are now handled specially by the codegen
+// (all methods are treated as primitive and use built-in implementations).
 // Returns nil if valid, error otherwise.
 func (c *Class) ValidatePrimitiveClass() error {
 	if !c.IsPrimitiveClass() {
@@ -83,19 +85,6 @@ func (c *Class) ValidatePrimitiveClass() error {
 	if len(c.Traits) > 0 {
 		return fmt.Errorf("class '%s' has pragma: primitiveClass but includes traits: %s\nPrimitive classes cannot include traits.",
 			c.Name, strings.Join(c.Traits, ", "))
-	}
-
-	// Check all methods are primitive or raw
-	var nonPrimitive []string
-	for _, m := range c.Methods {
-		if !m.Primitive && !m.Raw {
-			nonPrimitive = append(nonPrimitive, m.Selector)
-		}
-	}
-
-	if len(nonPrimitive) > 0 {
-		return fmt.Errorf("class '%s' has pragma: primitiveClass but contains non-primitive methods:\n  %s\nAll methods in a primitiveClass must use primitiveMethod:, primitiveClassMethod:, rawMethod:, or rawClassMethod:",
-			c.Name, strings.Join(nonPrimitive, ", "))
 	}
 
 	return nil

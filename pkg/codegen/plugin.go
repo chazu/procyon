@@ -13,14 +13,8 @@ import (
 // GeneratePlugin produces Go source code for a c-shared plugin.
 // The output can be built with: go build -buildmode=c-shared -o Class.so
 func GeneratePlugin(class *ast.Class) *Result {
-	// Skip primitive classes entirely - they contain raw bash that can't be natively compiled
-	if class.IsPrimitiveClass() {
-		return &Result{
-			Code:           "",
-			Warnings:       []string{},
-			SkippedMethods: []SkippedMethod{},
-		}
-	}
+	// For primitiveClass, we generate a plugin using built-in implementations from primitiveRegistry.
+	// Each method is treated as primitive and looked up in hasPrimitiveImpl().
 
 	g := &generator{
 		class:          class,

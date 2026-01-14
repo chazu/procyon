@@ -14,14 +14,8 @@ import (
 // GenerateSharedPlugin produces Go source code for a plugin that links against libtrashtalk.
 // The output registers itself with the shared runtime at load time via init().
 func GenerateSharedPlugin(class *ast.Class) *Result {
-	// Skip primitive classes entirely - they contain raw bash that can't be natively compiled
-	if class.IsPrimitiveClass() {
-		return &Result{
-			Code:           "",
-			Warnings:       []string{},
-			SkippedMethods: []SkippedMethod{},
-		}
-	}
+	// For primitiveClass, we generate a plugin using built-in implementations from primitiveRegistry.
+	// Each method is treated as primitive and looked up in hasPrimitiveImpl().
 
 	g := &generator{
 		class:          class,
