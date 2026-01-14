@@ -17,7 +17,7 @@ var (
 	strict     = flag.Bool("strict", false, "fail on unsupported constructs instead of warning")
 	dryRun     = flag.Bool("dry-run", false, "show what would be generated without outputting")
 	version    = flag.Bool("version", false, "print version and exit")
-	mode       = flag.String("mode", "binary", "output mode: bash (Bash script), binary (Go standalone), or plugin (Go c-shared library)")
+	mode       = flag.String("mode", "binary", "output mode: bash (Bash script), binary (Go standalone), plugin (Go c-shared library), or shared (links against libtrashtalk)")
 	sourceFile = flag.String("source-file", "", "path to original source file for embedding (bash mode only)")
 )
 
@@ -70,8 +70,8 @@ func main() {
 	}
 	class := unit.Class
 
-	// For plugin mode, skip primitive classes entirely (they contain raw bash)
-	if *mode == "plugin" && class.IsPrimitiveClass() {
+	// For plugin/shared modes, skip primitive classes entirely (they contain raw bash)
+	if (*mode == "plugin" || *mode == "shared") && class.IsPrimitiveClass() {
 		// Output nothing - the Makefile checks for empty output and skips
 		os.Exit(0)
 	}
@@ -123,8 +123,10 @@ func main() {
 		result = codegen.Generate(class)
 	case "plugin":
 		result = codegen.GeneratePlugin(class)
+	case "shared":
+		result = codegen.GenerateSharedPlugin(class)
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown mode %q (use 'bash', 'binary', or 'plugin')\n", *mode)
+		fmt.Fprintf(os.Stderr, "Error: unknown mode %q (use 'bash', 'binary', 'plugin', or 'shared')\n", *mode)
 		os.Exit(1)
 	}
 
