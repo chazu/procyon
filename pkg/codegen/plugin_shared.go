@@ -97,9 +97,9 @@ func (g *generator) generateSharedPlugin() *Result {
 	g.generateJSONHelpers(f)
 	f.Line()
 
-	// gRPC helper functions for GrpcClient class
+	// gRPC helper functions for GrpcClient class (optimized for shared runtime)
 	if g.class.Name == "GrpcClient" {
-		g.generateGrpcHelpers(f)
+		g.generateGrpcHelpersShared(f)
 	}
 
 	// First pass: identify which methods will be skipped
@@ -375,6 +375,56 @@ func (g *generator) generateSharedPluginHelpers(f *jen.File) {
 	)
 	f.Line()
 
+	// lookupBlock - gets a TTBlock pointer from a block ID
+	f.Comment("// lookupBlock retrieves a block pointer from the shared runtime")
+	f.Func().Id("lookupBlock").Params(
+		jen.Id("blockID").String(),
+	).Op("*").Qual("C", "TTBlock").Block(
+		jen.Id("cID").Op(":=").Qual("C", "CString").Call(jen.Id("blockID")),
+		jen.Defer().Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cID"))),
+		jen.Return(jen.Qual("C", "TT_LookupBlock").Call(jen.Id("cID"))),
+	)
+	f.Line()
+
+	// invokeBlockDirect - uses shared runtime's TT_InvokeBlockDirect with block pointer
+	f.Comment("// invokeBlockDirect invokes a block using direct pointer (faster than invokeBlock)")
+	f.Func().Id("invokeBlockDirect").Params(
+		jen.Id("block").Op("*").Qual("C", "TTBlock"),
+		jen.Id("args").Op("...").Interface(),
+	).String().Block(
+		jen.If(jen.Id("block").Op("==").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+
+		// Build args array
+		jen.Id("cArgs").Op(":=").Make(jen.Index().Qual("C", "TTValue"), jen.Len(jen.Id("args"))),
+		jen.For(jen.List(jen.Id("i"), jen.Id("arg")).Op(":=").Range().Id("args")).Block(
+			jen.Id("argStr").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%v"), jen.Id("arg")),
+			jen.Id("cStr").Op(":=").Qual("C", "CString").Call(jen.Id("argStr")),
+			jen.Id("cArgs").Index(jen.Id("i")).Op("=").Qual("C", "TT_MakeString").Call(jen.Id("cStr")),
+		),
+
+		// Call TT_InvokeBlockDirect
+		jen.Var().Id("argsPtr").Op("*").Qual("C", "TTValue"),
+		jen.If(jen.Len(jen.Id("cArgs")).Op(">").Lit(0)).Block(
+			jen.Id("argsPtr").Op("=").Op("&").Id("cArgs").Index(jen.Lit(0)),
+		),
+		jen.Id("result").Op(":=").Qual("C", "TT_InvokeBlockDirect").Call(
+			jen.Id("block"),
+			jen.Id("argsPtr"),
+			jen.Qual("C", "int").Call(jen.Len(jen.Id("args"))),
+		),
+
+		// Convert result to Go string
+		jen.Id("cResult").Op(":=").Qual("C", "TT_ValueAsString").Call(jen.Id("result")),
+		jen.If(jen.Id("cResult").Op("==").Nil()).Block(
+			jen.Return(jen.Lit("")),
+		),
+		jen.Defer().Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cResult"))),
+		jen.Return(jen.Qual("C", "GoString").Call(jen.Id("cResult"))),
+	)
+	f.Line()
+
 	// invokeBlock - uses shared runtime's TT_InvokeBlock
 	f.Comment("// invokeBlock calls a Trashtalk block through the shared runtime")
 	f.Func().Id("invokeBlock").Params(
@@ -611,5 +661,317 @@ func (g *generator) generateSharedMethodExports(f *jen.File, instanceMethods, cl
 		jen.Return(
 			jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"instance":%s,"result":%q,"exit_code":0}`), jen.String().Parens(jen.Id("updatedJSON")), jen.Id("result")),
 		),
+	)
+}
+
+// generateGrpcHelpersShared generates gRPC helpers optimized for shared runtime
+// This version uses lookupBlock/invokeBlockDirect for zero-overhead streaming callbacks
+func (g *generator) generateGrpcHelpersShared(f *jen.File) {
+	f.Line()
+	f.Comment("// gRPC helper functions for GrpcClient (shared runtime optimized)")
+	f.Line()
+
+	// getConnection - lazy connection creation
+	f.Comment("// getConnection returns an existing connection or creates a new one")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("getConnection").Params().Parens(jen.List(
+		jen.Op("*").Qual("google.golang.org/grpc", "ClientConn"),
+		jen.Error(),
+	)).Block(
+		jen.If(jen.Id("c").Dot("conn").Op("!=").Nil()).Block(
+			jen.Return(jen.Id("c").Dot("conn"), jen.Nil()),
+		),
+		jen.Var().Id("opts").Index().Qual("google.golang.org/grpc", "DialOption"),
+		jen.If(jen.Id("c").Dot("UsePlaintext").Op("==").Lit("yes")).Block(
+			jen.Id("opts").Op("=").Append(jen.Id("opts"), jen.Qual("google.golang.org/grpc", "WithTransportCredentials").Call(
+				jen.Qual("google.golang.org/grpc/credentials/insecure", "NewCredentials").Call(),
+			)),
+		),
+		jen.List(jen.Id("conn"), jen.Err()).Op(":=").Qual("google.golang.org/grpc", "NewClient").Call(
+			jen.Id("c").Dot("Address"),
+			jen.Id("opts").Op("..."),
+		),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Nil(), jen.Err()),
+		),
+		jen.If(jen.Id("c").Dot("PoolConnections").Op("==").Lit("yes")).Block(
+			jen.Id("c").Dot("conn").Op("=").Id("conn"),
+		),
+		jen.Return(jen.Id("conn"), jen.Nil()),
+	)
+	f.Line()
+
+	// closeConnection
+	f.Comment("// closeConnection closes the pooled connection if any")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("closeConnection").Params().Block(
+		jen.If(jen.Id("c").Dot("conn").Op("!=").Nil()).Block(
+			jen.Id("c").Dot("conn").Dot("Close").Call(),
+			jen.Id("c").Dot("conn").Op("=").Nil(),
+		),
+	)
+	f.Line()
+
+	// loadProtoFile
+	f.Comment("// loadProtoFile parses a proto file and caches the descriptors")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("loadProtoFile").Params().Error().Block(
+		jen.If(jen.Len(jen.Id("c").Dot("fileDescs")).Op(">").Lit(0)).Block(
+			jen.Return(jen.Nil()),
+		),
+		jen.If(jen.Id("c").Dot("ProtoFile").Op("==").Lit("")).Block(
+			jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("no proto file specified"))),
+		),
+		jen.Id("parser").Op(":=").Qual("github.com/jhump/protoreflect/desc/protoparse", "Parser").Values(jen.Dict{
+			jen.Id("ImportPaths"): jen.Index().String().Values(
+				jen.Qual("path/filepath", "Dir").Call(jen.Id("c").Dot("ProtoFile")),
+				jen.Lit("."),
+			),
+		}),
+		jen.List(jen.Id("fds"), jen.Err()).Op(":=").Id("parser").Dot("ParseFiles").Call(
+			jen.Qual("path/filepath", "Base").Call(jen.Id("c").Dot("ProtoFile")),
+		),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to parse proto file %s: %w"), jen.Id("c").Dot("ProtoFile"), jen.Err())),
+		),
+		jen.Id("c").Dot("fileDescs").Op("=").Id("fds"),
+		jen.Return(jen.Nil()),
+	)
+	f.Line()
+
+	// findMethodInProto
+	f.Comment("// findMethodInProto finds a method descriptor from parsed proto files")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("findMethodInProto").Params(
+		jen.Id("fullMethod").String(),
+	).Parens(jen.List(jen.Op("*").Qual("github.com/jhump/protoreflect/desc", "MethodDescriptor"), jen.Error())).Block(
+		jen.If(jen.Err().Op(":=").Id("c").Dot("loadProtoFile").Call().Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Nil(), jen.Err()),
+		),
+		jen.Id("parts").Op(":=").Qual("strings", "Split").Call(jen.Id("fullMethod"), jen.Lit("/")),
+		jen.If(jen.Len(jen.Id("parts")).Op("!=").Lit(2)).Block(
+			jen.Return(jen.Nil(), jen.Qual("fmt", "Errorf").Call(jen.Lit("invalid method format: %s"), jen.Id("fullMethod"))),
+		),
+		jen.List(jen.Id("svcName"), jen.Id("mtdName")).Op(":=").List(jen.Id("parts").Index(jen.Lit(0)), jen.Id("parts").Index(jen.Lit(1))),
+		jen.For(jen.List(jen.Id("_"), jen.Id("fd")).Op(":=").Range().Id("c").Dot("fileDescs")).Block(
+			jen.For(jen.List(jen.Id("_"), jen.Id("svc")).Op(":=").Range().Id("fd").Dot("GetServices").Call()).Block(
+				jen.If(jen.Id("svc").Dot("GetFullyQualifiedName").Call().Op("==").Id("svcName")).Block(
+					jen.For(jen.List(jen.Id("_"), jen.Id("mtd")).Op(":=").Range().Id("svc").Dot("GetMethods").Call()).Block(
+						jen.If(jen.Id("mtd").Dot("GetName").Call().Op("==").Id("mtdName")).Block(
+							jen.Return(jen.Id("mtd"), jen.Nil()),
+						),
+					),
+				),
+			),
+		),
+		jen.Return(jen.Nil(), jen.Qual("fmt", "Errorf").Call(jen.Lit("method not found: %s"), jen.Id("fullMethod"))),
+	)
+	f.Line()
+
+	// resolveMethod
+	f.Comment("// resolveMethod resolves method to descriptor and creates stub")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("resolveMethod").Params(
+		jen.Id("method").String(),
+	).Parens(jen.List(
+		jen.Op("*").Qual("google.golang.org/grpc", "ClientConn"),
+		jen.Qual("context", "Context"),
+		jen.Op("*").Qual("github.com/jhump/protoreflect/desc", "MethodDescriptor"),
+		jen.Qual("github.com/jhump/protoreflect/grpcreflect", "MethodDescriptor"),
+		jen.Func().Params(),
+		jen.Error(),
+	)).Block(
+		jen.List(jen.Id("conn"), jen.Err()).Op(":=").Id("c").Dot("getConnection").Call(),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Err()),
+		),
+		jen.Id("cleanup").Op(":=").Func().Params().Block(
+			jen.If(jen.Id("c").Dot("PoolConnections").Op("!=").Lit("yes")).Block(
+				jen.Id("conn").Dot("Close").Call(),
+			),
+		),
+		jen.Id("ctx").Op(":=").Qual("context", "Background").Call(),
+		jen.Var().Id("mtdDesc").Op("*").Qual("github.com/jhump/protoreflect/desc", "MethodDescriptor"),
+		jen.If(jen.Id("c").Dot("UseReflection").Op("==").Lit("yes")).Block(
+			jen.Id("refClient").Op(":=").Qual("github.com/jhump/protoreflect/grpcreflect", "NewClientAuto").Call(jen.Id("ctx"), jen.Id("conn")),
+			jen.Defer().Id("refClient").Dot("Reset").Call(),
+			jen.Id("parts").Op(":=").Qual("strings", "Split").Call(jen.Id("method"), jen.Lit("/")),
+			jen.If(jen.Len(jen.Id("parts")).Op("!=").Lit(2)).Block(
+				jen.Id("cleanup").Call(),
+				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("fmt", "Errorf").Call(jen.Lit("invalid method format"))),
+			),
+			jen.List(jen.Id("svcDesc"), jen.Err()).Op(":=").Id("refClient").Dot("ResolveService").Call(jen.Id("parts").Index(jen.Lit(0))),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Id("cleanup").Call(),
+				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Err()),
+			),
+			jen.Id("mtdDesc").Op("=").Id("svcDesc").Dot("FindMethodByName").Call(jen.Id("parts").Index(jen.Lit(1))),
+			jen.If(jen.Id("mtdDesc").Op("==").Nil()).Block(
+				jen.Id("cleanup").Call(),
+				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("fmt", "Errorf").Call(jen.Lit("method not found: %s"), jen.Id("method"))),
+			),
+		).Else().Block(
+			jen.List(jen.Id("mtdDesc"), jen.Err()).Op("=").Id("c").Dot("findMethodInProto").Call(jen.Id("method")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Id("cleanup").Call(),
+				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Err()),
+			),
+		),
+		jen.Id("stub").Op(":=").Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "NewStub").Call(jen.Id("conn")),
+		jen.Return(jen.Id("conn"), jen.Id("ctx"), jen.Id("mtdDesc"), jen.Id("stub"), jen.Id("cleanup"), jen.Nil()),
+	)
+	f.Line()
+
+	// grpcCall - unary call
+	f.Comment("// grpcCall makes a unary gRPC call")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("grpcCall").Params(
+		jen.Id("method").String(),
+		jen.Id("jsonPayload").String(),
+	).Parens(jen.List(jen.String(), jen.Error())).Block(
+		jen.List(jen.Id("_"), jen.Id("ctx"), jen.Id("mtdDesc"), jen.Id("stub"), jen.Id("cleanup"), jen.Err()).Op(":=").Id("c").Dot("resolveMethod").Call(jen.Id("method")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Err()),
+		),
+		jen.Defer().Id("cleanup").Call(),
+		jen.Id("reqMsg").Op(":=").Qual("github.com/jhump/protoreflect/dynamic", "NewMessage").Call(jen.Id("mtdDesc").Dot("GetInputType").Call()),
+		jen.If(jen.Err().Op(":=").Id("reqMsg").Dot("UnmarshalJSON").Call(jen.Index().Byte().Parens(jen.Id("jsonPayload"))).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to parse request: %w"), jen.Err())),
+		),
+		jen.List(jen.Id("respMsg"), jen.Err()).Op(":=").Id("stub").Dot("InvokeRpc").Call(jen.Id("ctx"), jen.Id("mtdDesc"), jen.Id("reqMsg")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Err()),
+		),
+		jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Assert(jen.Op("*").Qual("github.com/jhump/protoreflect/dynamic", "Message")).Dot("MarshalJSON").Call(),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Err()),
+		),
+		jen.Return(jen.String().Parens(jen.Id("respJSON")), jen.Nil()),
+	)
+	f.Line()
+
+	// serverStream - OPTIMIZED with direct block invocation
+	f.Comment("// serverStream makes a server streaming gRPC call with native block callback")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("serverStream").Params(
+		jen.Id("method").String(),
+		jen.Id("jsonPayload").String(),
+		jen.Id("handlerBlockID").String(),
+	).Parens(jen.List(jen.String(), jen.Error())).Block(
+		jen.List(jen.Id("_"), jen.Id("ctx"), jen.Id("mtdDesc"), jen.Id("stub"), jen.Id("cleanup"), jen.Err()).Op(":=").Id("c").Dot("resolveMethod").Call(jen.Id("method")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Err()),
+		),
+		jen.Defer().Id("cleanup").Call(),
+		jen.If(jen.Op("!").Id("mtdDesc").Dot("IsServerStreaming").Call()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("method is not server streaming"))),
+		),
+		jen.Id("reqMsg").Op(":=").Qual("github.com/jhump/protoreflect/dynamic", "NewMessage").Call(jen.Id("mtdDesc").Dot("GetInputType").Call()),
+		jen.If(jen.Err().Op(":=").Id("reqMsg").Dot("UnmarshalJSON").Call(jen.Index().Byte().Parens(jen.Id("jsonPayload"))).Op(";").Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to parse request: %w"), jen.Err())),
+		),
+		jen.List(jen.Id("stream"), jen.Err()).Op(":=").Id("stub").Dot("InvokeRpcServerStream").Call(jen.Id("ctx"), jen.Id("mtdDesc"), jen.Id("reqMsg")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to start stream: %w"), jen.Err())),
+		),
+		jen.Comment("// Look up block ONCE before loop for zero-overhead invocation"),
+		jen.Id("block").Op(":=").Id("lookupBlock").Call(jen.Id("handlerBlockID")),
+		jen.Id("count").Op(":=").Lit(0),
+		jen.For().Block(
+			jen.List(jen.Id("respMsg"), jen.Err()).Op(":=").Id("stream").Dot("RecvMsg").Call(),
+			jen.If(jen.Err().Op("==").Qual("io", "EOF")).Block(jen.Break()),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("stream error: %w"), jen.Err())),
+			),
+			jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Assert(jen.Op("*").Qual("github.com/jhump/protoreflect/dynamic", "Message")).Dot("MarshalJSON").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(jen.Continue()),
+			jen.Comment("// Direct block invocation - no IPC, no bash"),
+			jen.Id("invokeBlockDirect").Call(jen.Id("block"), jen.String().Parens(jen.Id("respJSON"))),
+			jen.Id("count").Op("++"),
+		),
+		jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%d"), jen.Id("count")), jen.Nil()),
+	)
+	f.Line()
+
+	// clientStream - OPTIMIZED with direct block invocation
+	f.Comment("// clientStream makes a client streaming gRPC call with native block callback")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("clientStream").Params(
+		jen.Id("method").String(),
+		jen.Id("handlerBlockID").String(),
+	).Parens(jen.List(jen.String(), jen.Error())).Block(
+		jen.List(jen.Id("_"), jen.Id("ctx"), jen.Id("mtdDesc"), jen.Id("stub"), jen.Id("cleanup"), jen.Err()).Op(":=").Id("c").Dot("resolveMethod").Call(jen.Id("method")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Err()),
+		),
+		jen.Defer().Id("cleanup").Call(),
+		jen.If(jen.Op("!").Id("mtdDesc").Dot("IsClientStreaming").Call()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("method is not client streaming"))),
+		),
+		jen.List(jen.Id("stream"), jen.Err()).Op(":=").Id("stub").Dot("InvokeRpcClientStream").Call(jen.Id("ctx"), jen.Id("mtdDesc")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to start stream: %w"), jen.Err())),
+		),
+		jen.Comment("// Look up block ONCE before loop for zero-overhead invocation"),
+		jen.Id("block").Op(":=").Id("lookupBlock").Call(jen.Id("handlerBlockID")),
+		jen.For().Block(
+			jen.Comment("// Direct block invocation - no IPC, no bash"),
+			jen.Id("msgJSON").Op(":=").Id("invokeBlockDirect").Call(jen.Id("block")),
+			jen.If(jen.Id("msgJSON").Op("==").Lit("")).Block(jen.Break()),
+			jen.Id("reqMsg").Op(":=").Qual("github.com/jhump/protoreflect/dynamic", "NewMessage").Call(jen.Id("mtdDesc").Dot("GetInputType").Call()),
+			jen.If(jen.Err().Op(":=").Id("reqMsg").Dot("UnmarshalJSON").Call(jen.Index().Byte().Parens(jen.Id("msgJSON"))).Op(";").Err().Op("!=").Nil()).Block(jen.Continue()),
+			jen.If(jen.Err().Op(":=").Id("stream").Dot("SendMsg").Call(jen.Id("reqMsg")).Op(";").Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("send error: %w"), jen.Err())),
+			),
+		),
+		jen.List(jen.Id("respMsg"), jen.Err()).Op(":=").Id("stream").Dot("CloseAndReceive").Call(),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("close error: %w"), jen.Err())),
+		),
+		jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Assert(jen.Op("*").Qual("github.com/jhump/protoreflect/dynamic", "Message")).Dot("MarshalJSON").Call(),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Err()),
+		),
+		jen.Return(jen.String().Parens(jen.Id("respJSON")), jen.Nil()),
+	)
+	f.Line()
+
+	// bidiStream - OPTIMIZED with direct block invocation
+	f.Comment("// bidiStream makes a bidirectional streaming gRPC call with native block callback")
+	f.Func().Parens(jen.Id("c").Op("*").Id("GrpcClient")).Id("bidiStream").Params(
+		jen.Id("method").String(),
+		jen.Id("handlerBlockID").String(),
+	).Parens(jen.List(jen.String(), jen.Error())).Block(
+		jen.List(jen.Id("_"), jen.Id("ctx"), jen.Id("mtdDesc"), jen.Id("stub"), jen.Id("cleanup"), jen.Err()).Op(":=").Id("c").Dot("resolveMethod").Call(jen.Id("method")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Err()),
+		),
+		jen.Defer().Id("cleanup").Call(),
+		jen.If(jen.Op("!").Id("mtdDesc").Dot("IsClientStreaming").Call().Op("||").Op("!").Id("mtdDesc").Dot("IsServerStreaming").Call()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("method is not bidirectional streaming"))),
+		),
+		jen.List(jen.Id("stream"), jen.Err()).Op(":=").Id("stub").Dot("InvokeRpcBidiStream").Call(jen.Id("ctx"), jen.Id("mtdDesc")),
+		jen.If(jen.Err().Op("!=").Nil()).Block(
+			jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("failed to start stream: %w"), jen.Err())),
+		),
+		jen.Comment("// Look up block ONCE before loop for zero-overhead invocation"),
+		jen.Id("block").Op(":=").Id("lookupBlock").Call(jen.Id("handlerBlockID")),
+		jen.Id("count").Op(":=").Lit(0),
+		jen.Id("done").Op(":=").Make(jen.Chan().Struct()),
+		jen.Comment("// Goroutine to receive responses"),
+		jen.Go().Func().Params().Block(
+			jen.Defer().Close(jen.Id("done")),
+			jen.For().Block(
+				jen.List(jen.Id("respMsg"), jen.Err()).Op(":=").Id("stream").Dot("RecvMsg").Call(),
+				jen.If(jen.Err().Op("==").Qual("io", "EOF")).Block(jen.Return()),
+				jen.If(jen.Err().Op("!=").Nil()).Block(jen.Return()),
+				jen.List(jen.Id("respJSON"), jen.Err()).Op(":=").Id("respMsg").Assert(jen.Op("*").Qual("github.com/jhump/protoreflect/dynamic", "Message")).Dot("MarshalJSON").Call(),
+				jen.If(jen.Err().Op("!=").Nil()).Block(jen.Continue()),
+				jen.Comment("// Direct block invocation - no IPC, no bash"),
+				jen.Id("reply").Op(":=").Id("invokeBlockDirect").Call(jen.Id("block"), jen.String().Parens(jen.Id("respJSON"))),
+				jen.If(jen.Id("reply").Op("!=").Lit("")).Block(
+					jen.Id("reqMsg").Op(":=").Qual("github.com/jhump/protoreflect/dynamic", "NewMessage").Call(jen.Id("mtdDesc").Dot("GetInputType").Call()),
+					jen.If(jen.Err().Op(":=").Id("reqMsg").Dot("UnmarshalJSON").Call(jen.Index().Byte().Parens(jen.Id("reply"))).Op(";").Err().Op("==").Nil()).Block(
+						jen.Id("stream").Dot("SendMsg").Call(jen.Id("reqMsg")),
+					),
+				),
+				jen.Id("count").Op("++"),
+			),
+		).Call(),
+		jen.Op("<-").Id("done"),
+		jen.Id("stream").Dot("CloseSend").Call(),
+		jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("%d"), jen.Id("count")), jen.Nil()),
 	)
 }
