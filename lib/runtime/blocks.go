@@ -190,7 +190,7 @@ func (br *BlockRunner) SendMessage(receiver, selector string, args ...string) (s
 	result := br.dispatcher.Send(receiver, selector, valueArgs)
 
 	if result.Type == TypeError {
-		return "", fmt.Errorf(result.ErrorMsg)
+		return "", fmt.Errorf("%s", result.ErrorMsg)
 	}
 
 	return result.AsString(), nil
