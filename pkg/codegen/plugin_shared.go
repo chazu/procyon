@@ -39,17 +39,7 @@ func GenerateSharedPluginWithOptions(class *ast.Class, opts GenerateOptions) *Re
 		isNativeType := iv.Default.Type == "string" || iv.Default.Type == "number"
 		if !isNativeType {
 			// Fallback: check if default value looks numeric (for backwards compatibility)
-			defaultVal := iv.Default.Value
-			if len(defaultVal) > 0 {
-				isNumeric := true
-				for i, c := range defaultVal {
-					if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
-						isNumeric = false
-						break
-					}
-				}
-				isNativeType = isNumeric
-			}
+			isNativeType = isNumericString(iv.Default.Value)
 		}
 		if !isNativeType {
 			g.jsonVars[iv.Name] = true

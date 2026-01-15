@@ -6,15 +6,14 @@
 
 *Procyon: the genus for raccoons - because what goes better with trash?*
 
-Procyon is a Go code generator for [Trashtalk](https://github.com/chazu/trashtalk), a Smalltalk-inspired DSL that compiles to Bash. It takes the AST output from Trashtalk's jq-based parser and generates native Go binaries that interoperate with the Bash runtime.
+Procyon is a Go code generator for [Trashtalk](https://github.com/chazu/trashtalk), a Smalltalk-inspired DSL that compiles to Bash. It takes the AST output from Trashtalk's jq-based parser and generates either Bash scripts or Go shared libraries that integrate with the Trashtalk runtime.
 
 ## Status
 
-**M1 Complete** - Minimal viable generator working.
+**M5 Complete** - Full code generation working with two backends.
 
-- Compiles simple arithmetic methods to native Go
-- Falls back to Bash for unsupported constructs
-- Full interop with Trashtalk runtime via shared SQLite storage
+- **Bash backend**: Generates optimized Bash scripts from Trashtalk AST
+- **Shared library mode**: Generates Go dylibs loaded by trashtalk-daemon for native performance
 
 ## Installation
 
@@ -32,34 +31,41 @@ go build -o procyon ./cmd/procyon
 
 ## Usage
 
-Procyon reads AST JSON from stdin and writes Go code to stdout:
+Procyon reads AST JSON from stdin and writes code to stdout:
 
 ```bash
-# Generate Go code from a .trash file
-./driver.bash parse Counter.trash | procyon > counter/main.go
+# Generate Bash script
+./driver.bash parse Counter.trash | procyon --mode bash > Counter.bash
 
-# Copy the source file for embedding
-cp Counter.trash counter/
+# Generate Go shared library source
+./driver.bash parse Counter.trash | procyon --mode shared > counter/main.go
 
-# Build the native binary
-cd counter && go build -o Counter.native .
-
-# Install to trashtalk
-cp Counter.native ~/.trashtalk/trash/.compiled/
+# Build the shared library
+cd counter && go build -buildmode=c-shared -o Counter.so .
 ```
 
 ### CLI Options
 
 ```
-procyon [options] < ast.json > output.go
+procyon [options] < ast.json > output
 
 Options:
-  --strict    Fail on unsupported constructs instead of warning
-  --dry-run   Show what would be generated without outputting
-  --version   Print version and exit
+  --mode string     Output mode: bash or shared (default "shared")
+  --strict          Fail on unsupported constructs instead of warning
+  --dry-run         Show what would be generated without outputting
+  --source-file     Path to original source file for embedding (bash mode)
+  --skip-vet        Skip Go validation of generated code (shared mode)
+  --version         Print version and exit
 ```
 
-### Output
+### Output Modes
+
+| Mode | Output | Use Case |
+|------|--------|----------|
+| `bash` | Bash script | Direct execution, debugging |
+| `shared` | Go source for dylib | Native performance via trashtalk-daemon |
+
+### Generation Report
 
 Procyon reports which methods were compiled and which will fall back to Bash:
 
@@ -70,9 +76,8 @@ procyon: Counter.trash
   ✓ getStep - compiled
   ✓ setValue_ - compiled
   ✓ increment - compiled
-  ⚠ description - skipped: class methods not yet supported
 
-Generated 4/6 methods. 2 will fall back to Bash.
+Generated 4/5 methods. 1 will fall back to Bash.
 ```
 
 ## Architecture
@@ -85,20 +90,40 @@ Generated 4/6 methods. 2 will fall back to Bash.
 │  └─────────────┘    │ (bash)      │    │ (outputs AST JSON)  │ │
 │                     └─────────────┘    └──────────┬──────────┘ │
 └──────────────────────────────────────────────────│─────────────┘
-                                                    │
-                                                    ▼ AST JSON (stdin)
+                                                   │
+                                                   ▼ AST JSON (stdin)
 ┌─────────────────────────────────────────────────────────────────┐
 │                         procyon repo                            │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │                       procyon CLI                           ││
 │  │  ┌──────────┐    ┌──────────────┐    ┌──────────────────┐  ││
-│  │  │ AST      │───▶│ Token Stream │───▶│ Go Code          │  ││
-│  │  │ Parser   │    │ Parser       │    │ Generator        │  ││
+│  │  │ AST      │───▶│ IR Builder   │───▶│ Backend          │  ││
+│  │  │ Parser   │    │              │    │ (Bash or Shared) │  ││
 │  │  └──────────┘    └──────────────┘    └──────────────────┘  ││
 │  └─────────────────────────────────────────────────────────────┘│
 │                              │                                   │
-│                              ▼                                   │
-│                        main.go output                            │
+│              ┌───────────────┴───────────────┐                  │
+│              ▼                               ▼                  │
+│        Bash script                    Go shared lib source      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Shared Library Runtime
+
+For native performance, compiled classes run as shared libraries loaded by trashtalk-daemon:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      trashtalk-daemon                           │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  libtrashtalk (C runtime)                                   ││
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                  ││
+│  │  │Counter.so│  │Person.so │  │Widget.so │  ...              ││
+│  │  └──────────┘  └──────────┘  └──────────┘                  ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                              │                                   │
+│                              ▼ Unix socket / JSON protocol       │
+│                         Bash runtime                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -107,21 +132,19 @@ Generated 4/6 methods. 2 will fall back to Bash.
 ```
 procyon/
 ├── cmd/
-│   └── procyon/
-│       └── main.go           # CLI entry point
+│   ├── procyon/           # CLI entry point
+│   ├── trashtalk-daemon/  # Shared library loader daemon
+│   └── libtrashtalk/      # C runtime library
+├── lib/
+│   └── runtime/           # libtrashtalk headers
 ├── pkg/
-│   ├── ast/
-│   │   ├── types.go          # Go types matching jq parser output
-│   │   └── parse.go          # JSON → AST parsing
-│   ├── parser/
-│   │   └── parser.go         # Token stream → expression tree
-│   └── codegen/
-│       ├── codegen.go        # AST → Go code (using jennifer)
-│       └── codegen_test.go   # Acceptance tests
-├── testdata/
-│   └── counter/
-│       ├── input.json        # AST from jq parser
-│       └── expected.go       # Expected generated code
+│   ├── ast/               # Go types matching jq parser output
+│   ├── parser/            # Token stream → expression tree
+│   ├── ir/                # Intermediate representation
+│   ├── codegen/           # Code generators (Bash, Shared)
+│   ├── bytecode/          # Block VM for closure execution
+│   └── runtime/           # Go runtime helpers
+├── testdata/              # Acceptance test cases
 └── go.mod
 ```
 
@@ -148,71 +171,44 @@ The jq parser produces JSON like:
 }
 ```
 
-### 2. Token Stream Parsing
+### 2. IR Building
 
-Method bodies come as token streams, not expression trees. The parser converts:
-
-```
-IDENTIFIER(value) PLUS NUMBER(1)
-```
-
-Into:
-
-```go
-&BinaryExpr{
-  Left:  &Identifier{Name: "value"},
-  Op:    "+",
-  Right: &NumberLit{Value: "1"},
-}
-```
+The AST is converted to an intermediate representation that captures:
+- Type inference for instance variables
+- Method signatures and bodies
+- Control flow structure
 
 ### 3. Code Generation
 
-Using [jennifer](https://github.com/dave/jennifer), we generate Go code:
+**Bash Backend**: Generates optimized Bash functions with proper quoting and variable handling.
 
-- Struct from `instanceVars`
-- Method implementations from parsed expressions
-- Dispatch switch statement
-- SQLite instance storage helpers
-- Embedded source and content hash
+**Shared Backend**: Generates Go code that:
+- Exports C-compatible functions via cgo
+- Links against libtrashtalk for runtime services
+- Registers methods with the daemon on load
 
-### 4. Runtime Interop
+### 4. Runtime Integration
 
-Generated binaries share the same SQLite database (`~/.trashtalk/instances.db`) as the Bash runtime. The calling convention:
+**Bash mode**: Generated scripts are sourced directly by the Trashtalk runtime.
 
-```bash
-# Bash calls native binary
-./Counter.native <instance_id> <selector> [args...]
-
-# Exit codes:
-# 0   = success
-# 200 = unknown selector (fall back to Bash)
-# 1   = error
-```
+**Shared mode**: The daemon loads dylibs on demand and dispatches method calls via JSON protocol over Unix socket.
 
 ## What Compiles
 
-| Trashtalk | Go |
-|-----------|-----|
-| `instanceVars: value:0` | `type Counter struct { Value int }` |
-| `value` (read ivar) | `c.Value` |
-| `value := x` (write ivar) | `c.Value = x` |
-| `\| x y \|` | `var x, y int` |
-| `x := a + b` | `x = a + b` |
-| `^ value` | `return value` |
-
-## What Compiles (continued)
-
-| Trashtalk | Go |
-|-----------|-----|
-| `(a > b) ifTrue: [...]` | `if a > b { ... }` |
-| `(a > b) ifTrue: [...] ifFalse: [...]` | `if a > b { ... } else { ... }` |
-| `[cond] whileTrue: [...]` | `for cond { ... }` |
-| `@ self method` | `c.Method()` (direct call) |
-| `@ self keyword: arg` | `c.Keyword(arg)` (direct call) |
-| `@ OtherClass method` | `sendMessage(...)` (shells out to Bash) |
-| `package: MyApp` | Binary named `MyApp__Counter.native` |
-| `classMethod: foo [...]` | `func Foo() string` (package-level function) |
+| Trashtalk | Go/Bash |
+|-----------|---------|
+| `instanceVars: value:0` | `type Counter struct { Value int }` / `local value=0` |
+| `value` (read ivar) | `c.Value` / `$value` |
+| `value := x` | `c.Value = x` / `value=$x` |
+| `\| x y \|` | `var x, y int` / `local x y` |
+| `x := a + b` | `x = a + b` / `x=$((a + b))` |
+| `^ value` | `return value` / `echo "$value"` |
+| `(a > b) ifTrue: [...]` | `if a > b { ... }` / `if ((a > b)); then ... fi` |
+| `[cond] whileTrue: [...]` | `for cond { ... }` / `while ...; do ... done` |
+| `@ self method` | `c.Method()` / direct call |
+| `@ OtherClass method` | Shell out to Bash / message send |
+| `package: MyApp` | Namespaced class support |
+| `classMethod: foo [...]` | Package-level function / class function |
 
 ## What Falls Back to Bash
 
@@ -221,6 +217,20 @@ Generated binaries share the same SQLite database (`~/.trashtalk/instances.db`) 
 | `rawMethod:` | Contains arbitrary Bash |
 | `$(...)` subshells | Need Bash evaluation |
 | Trait methods | Trait inlining not yet implemented |
+
+## Primitive Classes
+
+Procyon includes built-in implementations for primitive classes:
+
+- **String**: String manipulation (trim, replace, split, etc.)
+- **File**: File I/O operations
+- **Shell**: Command execution and process control
+- **Env**: Environment variable access
+- **Console**: Terminal I/O
+- **Array/Dictionary**: Collection operations
+- **GrpcClient**: gRPC dynamic invocation
+
+These are generated using the `primitiveClass:` declaration in Trashtalk.
 
 ## Testing
 
@@ -242,38 +252,16 @@ Create a directory in `testdata/` with:
 
 See [DESIGN.md](DESIGN.md) for the full design document.
 
-### M1: Minimal Viable Generator ✅
-- Parse AST JSON
-- Generate struct from instanceVars
-- Generate simple arithmetic methods
-- Generate dispatch switch
-- Embed source and hash
+### Completed Milestones
 
-### M2: Control Flow ✅
-- `ifTrue:`/`ifFalse:` → `if`/`else`
-- `whileTrue:` → `for` loops
-- Comparison operators (`>`, `<`, `>=`, `<=`, `==`, `!=`)
-- Parenthesized expressions
-- Early return (`^`)
+- **M1**: Minimal Viable Generator - struct generation, simple methods
+- **M2**: Control Flow - if/else, while loops, comparisons
+- **M3**: Message Sends - self/external dispatch, trait awareness
+- **M4**: Namespace Support - package declarations, qualified names
+- **M5**: Class Methods & Backends - Bash backend, shared library mode
 
-### M3: Message Sends & Traits ✅
-- ✅ `@ self method` → direct method call
-- ✅ `@ self keyword: arg` → method call with args
-- ✅ `@ OtherClass method` → shell out to Bash via `sendMessage()`
-- Trait inlining deferred (see docs/trait-inlining.md)
+### Next (M6: Polish)
 
-### M4: Namespace Support ✅
-- `package:` declarations
-- Qualified class names (`MyApp::Counter`)
-- Correct binary naming (`MyApp__Counter.native`)
-- `--info` shows package and qualified name
-
-### M5: Class Methods ✅
-- `classMethod:` compilation to package-level functions
-- `dispatchClass()` for class-level dispatch
-- Receiver detection (class name vs instance ID)
-
-### M6: Polish (Next)
 - Better error messages
 - `--strict` mode improvements
 - Type inference improvements

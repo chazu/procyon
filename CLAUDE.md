@@ -4,7 +4,7 @@ Context for Claude Code when working on Procyon.
 
 ## What is Procyon?
 
-Procyon is a Go code generator for Trashtalk. It takes AST JSON from Trashtalk's jq-based parser and generates native Go binaries that interoperate with the Bash runtime.
+Procyon is a Go code generator for Trashtalk. It takes AST JSON from Trashtalk's jq-based parser and generates either Bash scripts or Go shared libraries that integrate with the Trashtalk runtime.
 
 **Key insight**: This is an experiment. Bash remains the primary Trashtalk runtime. Native compilation is an optimization, not a replacement.
 
@@ -12,39 +12,70 @@ Procyon is a Go code generator for Trashtalk. It takes AST JSON from Trashtalk's
 
 ```
 procyon/
-├── cmd/procyon/main.go       # CLI - reads AST JSON from stdin, writes Go to stdout
+├── cmd/
+│   ├── procyon/           # CLI - reads AST JSON from stdin, writes code to stdout
+│   ├── trashtalk-daemon/  # Shared library loader daemon
+│   └── libtrashtalk/      # C runtime library
+├── lib/
+│   └── runtime/           # libtrashtalk headers
 ├── pkg/
-│   ├── ast/                  # Types matching jq parser output + JSON parsing
-│   ├── parser/               # Token stream → expression tree (method bodies)
-│   └── codegen/              # Jennifer-based Go code generator
-├── testdata/counter/         # Acceptance test case
-├── DESIGN.md                 # Full design document
-└── README.md                 # User documentation
+│   ├── ast/               # Types matching jq parser output + JSON parsing
+│   ├── parser/            # Token stream → expression tree (method bodies)
+│   ├── ir/                # Intermediate representation
+│   ├── codegen/           # Code generators (Bash backend, Shared lib mode)
+│   ├── bytecode/          # Block VM for closure execution
+│   └── runtime/           # Go runtime helpers
+├── testdata/              # Acceptance test cases
+├── DESIGN.md              # Full design document
+└── README.md              # User documentation
+```
+
+## Output Modes
+
+Procyon supports two output modes:
+
+### Bash Mode (`--mode bash`)
+Generates optimized Bash scripts that are sourced by the Trashtalk runtime.
+
+```bash
+./driver.bash parse Counter.trash | procyon --mode bash > Counter.bash
+```
+
+### Shared Mode (`--mode shared`, default)
+Generates Go code compiled to shared libraries (dylibs) loaded by trashtalk-daemon.
+
+```bash
+./driver.bash parse Counter.trash | procyon --mode shared > counter/main.go
+cd counter && go build -buildmode=c-shared -o Counter.so .
 ```
 
 ## How the Pipeline Works
 
 ```bash
-# In trashtalk repo:
-./lib/jq-compiler/driver.bash parse Counter.trash | procyon > counter/main.go
+# Bash mode:
+./driver.bash parse Counter.trash | procyon --mode bash > Counter.bash
+
+# Shared library mode:
+./driver.bash parse Counter.trash | procyon --mode shared > counter/main.go
+go build -buildmode=c-shared -o ~/.trashtalk/plugins/Counter.so counter/main.go
 ```
 
 1. `driver.bash parse` → tokenizes and parses .trash file → outputs AST JSON
-2. `procyon` → reads AST JSON → generates Go code using jennifer
-3. `go build` → compiles to native binary
-4. Binary placed in `~/.trashtalk/trash/.compiled/Counter.native`
+2. `procyon` → reads AST JSON → generates Bash or Go code
+3. For shared mode: `go build -buildmode=c-shared` → compiles to dylib
+4. trashtalk-daemon loads dylibs on demand
 
 ## Key Design Decisions
 
 1. **Token stream parsing in Go**: The jq parser outputs method bodies as token streams, not expression trees. We parse these in Go rather than extending jq.
 
-2. **Jennifer for codegen**: Using github.com/dave/jennifer for programmatic Go code generation instead of text templates.
+2. **Jennifer for codegen**: Using github.com/dave/jennifer for programmatic Go code generation.
 
-3. **Fallback mechanism**: Exit code 200 means "unknown selector" - the Bash dispatcher falls back to interpreted execution.
+3. **Two backends**: Bash for debugging/compatibility, shared libs for performance.
 
-4. **Shared SQLite storage**: Both Bash and Go runtimes use `~/.trashtalk/instances.db` for instance persistence.
+4. **trashtalk-daemon**: Loads shared libraries on demand, dispatches via JSON protocol over Unix socket.
 
-5. **Self-describing binaries**: Each binary embeds its source code and content hash via `//go:embed`.
+5. **libtrashtalk**: C runtime library providing instance storage and method registration.
 
 ## Current Capabilities (M1-M5)
 
@@ -59,9 +90,10 @@ procyon/
 - Return statements (`^`)
 - Methods with arguments (string → int conversion)
 - Self message sends (`@ self method`, `@ self keyword: arg`)
-- External message sends (`@ OtherClass method`) via shell-out
-- Namespaced classes (`package: MyApp` → `MyApp__Counter.native`)
+- External message sends (`@ OtherClass method`)
+- Namespaced classes (`package: MyApp`)
 - Class methods (`classMethod:` → package-level Go functions)
+- Primitive classes (String, File, Shell, Env, Console, Array, Dictionary, GrpcClient)
 
 **Falls back to Bash:**
 - `new` method (uses subshells)
@@ -100,6 +132,12 @@ See DESIGN.md for the full roadmap. Key upcoming work:
 2. Handle in `pkg/parser/parser.go`
 3. Generate code in `pkg/codegen/codegen.go`
 
+### Adding a primitive class method
+
+1. Find the appropriate file: `primitives_string.go`, `primitives_file.go`, `primitives_shell.go`, or `primitives.go`
+2. Add a case to the switch statement in `generatePrimitiveMethod*`
+3. Generate the Go implementation using jennifer
+
 ### Debugging codegen
 
 The generated code should compile. If it doesn't:
@@ -110,6 +148,5 @@ The generated code should compile. If it doesn't:
 ## Related Repositories
 
 - **trashtalk** (`~/.trashtalk`): The main Trashtalk runtime and jq-based compiler
-  - `lib/trash.bash`: Runtime dispatcher (has native binary support)
+  - `lib/trash.bash`: Runtime dispatcher
   - `lib/jq-compiler/`: Tokenizer + parser + Bash codegen
-  - `docs/trashtalk-go-codegen-design.md`: Original design doc

@@ -354,7 +354,7 @@ func TestGeneratorInitialization(t *testing.T) {
 		},
 	}
 
-	result := Generate(class)
+	result := GenerateSharedPlugin(class)
 	if result == nil {
 		t.Fatal("Expected result, got nil")
 	}

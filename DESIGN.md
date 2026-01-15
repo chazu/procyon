@@ -4,32 +4,37 @@
 
 ## Overview
 
-This document describes the design for **Procyon**, a tool that generates native Go code from Trashtalk class definitions. The generated Go binaries interoperate with the Bash runtime, sharing instance storage via SQLite.
+This document describes the design for **Procyon**, a tool that generates code from Trashtalk class definitions. Procyon supports two output modes:
+
+1. **Bash backend**: Generates optimized Bash scripts
+2. **Shared library mode**: Generates Go code compiled to dylibs, loaded by trashtalk-daemon
 
 ## Goals
 
-1. **Speed**: Native Go execution for performance-critical classes
-2. **Interoperability**: Seamless interaction between Go and Bash classes
-3. **Self-describing binaries**: Embedded source code and content hash for versioning
-4. **Incremental adoption**: Compile individual classes without rewriting the whole system
+1. **Flexibility**: Support both interpreted (Bash) and native (Go dylib) execution
+2. **Interoperability**: Seamless interaction between Bash and native classes
+3. **Native performance**: Shared libraries for performance-critical classes
+4. **Incremental adoption**: Compile individual classes without rewriting the system
 
 ## Non-Goals (for v1)
 
 1. Compiling raw methods containing arbitrary Bash
-2. Full Smalltalk block/closure semantics
+2. Full Smalltalk block/closure semantics (partial support via bytecode VM)
 3. Replacing the Bash runtime entirely
-4. Optimizing cross-class calls (still goes through Bash for Bash classes)
+4. Standalone binary mode (removed in favor of shared library architecture)
 
 ## Key Decisions
 
-- **Traits**: Supported in v1
-- **Runtime code**: Inlined into generated output (no separate module to import)
-- **Code generation**: Use [jennifer](https://github.com/dave/jennifer) for programmatic Go code generation
-- **Testing strategy**: Acceptance tests first (AST → expected Go output), then unit tests for components
+- **Traits**: Supported in v1 (fall back to Bash for trait methods)
+- **Runtime code**: Shared libraries link against libtrashtalk
+- **Code generation**: Use [jennifer](https://github.com/dave/jennifer) for Go, custom backend for Bash
+- **Testing strategy**: Acceptance tests (AST → expected output), then unit tests
 - **Philosophy**: This is an experiment. Keep it simple. Bash remains the primary runtime. Native compilation is an optimization, not a replacement.
-- **Fallback behavior**: When a method can't be compiled, warn the user at generation time but allow fallback to Bash at runtime. The warning should clearly explain why the method couldn't be compiled.
+- **Fallback behavior**: When a method can't be compiled, warn the user at generation time. Methods fall back to Bash at runtime.
 
 ## Architecture
+
+### Pipeline Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -39,22 +44,39 @@ This document describes the design for **Procyon**, a tool that generates native
 │  └─────────────┘    │ (bash)      │    │ (outputs AST JSON)  │ │
 │                     └─────────────┘    └──────────┬──────────┘ │
 └──────────────────────────────────────────────────│─────────────┘
-                                                    │
-                                                    ▼ AST JSON (stdin)
+                                                   │
+                                                   ▼ AST JSON (stdin)
 ┌─────────────────────────────────────────────────────────────────┐
-│                         procyon repo                            │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                       procyon CLI                            ││
-│  │  ┌──────────┐    ┌──────────────┐    ┌──────────────────┐  ││
-│  │  │ AST      │───▶│ IR Builder   │───▶│ Go Code          │  ││
-│  │  │ Parser   │    │              │    │ Generator        │  ││
-│  │  └──────────┘    └──────────────┘    └──────────────────┘  ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                              │                                   │
-│                              ▼                                   │
-│                        main.go output                            │
+│                         procyon CLI                             │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │ AST      │───▶│ IR Builder   │───▶│ Backend              │  │
+│  │ Parser   │    │              │    │ (Bash or Shared)     │  │
+│  └──────────┘    └──────────────┘    └──────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Shared Library Runtime
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      trashtalk-daemon                           │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  libtrashtalk (C runtime)                                   ││
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                  ││
+│  │  │Counter.so│  │Person.so │  │Widget.so │  ...              ││
+│  │  └──────────┘  └──────────┘  └──────────┘                  ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                              │                                   │
+│                              ▼ Unix socket / JSON protocol       │
+│                         Bash runtime                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The daemon:
+- Loads shared libraries on demand
+- Dispatches method calls via JSON protocol
+- Maintains instance state through libtrashtalk
+- Supports idle timeout for resource management
 
 ## Input: AST Structure
 
@@ -65,6 +87,7 @@ The jq parser produces JSON with this structure:
   "type": "class",
   "name": "Counter",
   "parent": "Object",
+  "package": "MyApp",
   "instanceVars": [
     {"name": "value", "default": {"type": "number", "value": "0"}},
     {"name": "step", "default": {"type": "number", "value": "1"}}
@@ -73,13 +96,13 @@ The jq parser produces JSON with this structure:
   "methods": [
     {
       "type": "method",
-      "kind": "instance",        // or "class"
-      "raw": false,              // raw methods can't be compiled
+      "kind": "instance",
+      "raw": false,
       "selector": "increment",
       "args": [],
       "body": {
         "type": "block",
-        "tokens": [...]          // token stream, not expression tree
+        "tokens": [...]
       }
     }
   ]
@@ -88,60 +111,49 @@ The jq parser produces JSON with this structure:
 
 ### Key Observation: Method Bodies
 
-Method bodies are currently **token streams**, not parsed expression trees. The bash codegen processes these tokens directly. We have three options:
+Method bodies are **token streams**, not parsed expression trees. The bash codegen processes these tokens directly. We parse token streams in Go rather than extending jq.
 
-| Option | Approach | Pros | Cons |
-|--------|----------|------|------|
-| A | Parse tokens in Go codegen | Go is good at parsing; no jq changes | Duplicates parsing logic |
-| B | Extend jq parser to emit expression AST | Single source of truth | jq is awkward for complex parsing |
-| C | Add expression parser in jq, optional | Backwards compatible | More jq complexity |
+## Output Modes
 
-**Recommendation**: Option A - parse token streams in Go. The token stream is well-defined and Go has better tooling for expression parsing.
+### Bash Backend
 
-## Output: Generated Go Structure
+Generates shell functions:
+
+```bash
+Counter__increment() {
+    local value step
+    value=${_ivar_value:-0}
+    step=${_ivar_step:-1}
+
+    value=$((value + step))
+    _ivar_value=$value
+    echo "$value"
+}
+```
+
+### Shared Library Mode
+
+Generates Go code compiled to c-shared:
 
 ```go
 package main
 
-import (
-    "database/sql"
-    _ "embed"
-    "encoding/json"
-    // ...
-)
+/*
+#include <libtrashtalk.h>
+*/
+import "C"
 
-//go:embed Counter.trash
-var _sourceCode string
-var _contentHash = "sha256:..."
-
-// Instance struct from instanceVars
-type Counter struct {
-    Class     string   `json:"class"`
-    CreatedAt string   `json:"created_at"`
-    Vars      []string `json:"_vars"`
-    Value     int      `json:"value"`
-    Step      int      `json:"step"`
-}
-
-func main() {
-    // CLI dispatch: <receiver> <selector> [args...]
-}
-
-// Generated methods
-func (c *Counter) Increment() int {
+//export Counter_increment
+func Counter_increment(instanceID *C.char) *C.char {
+    c := loadInstance(C.GoString(instanceID))
     c.Value += c.Step
-    return c.Value
+    saveInstance(c)
+    return C.CString(strconv.Itoa(c.Value))
 }
 
-// Method dispatch
-func dispatch(c *Counter, selector string, args []string) (string, error) {
-    switch selector {
-    case "increment":
-        return strconv.Itoa(c.Increment()), nil
-    // ...
-    default:
-        return "", ErrUnknownSelector
-    }
+func init() {
+    // Register methods with runtime
+    C.register_method(C.CString("Counter"), C.CString("increment"), ...)
 }
 ```
 
@@ -149,45 +161,33 @@ func dispatch(c *Counter, selector string, args []string) (string, error) {
 
 ### Instance Variables
 
-| Trashtalk | Go |
-|-----------|-----|
-| `instanceVars: value:0 step:1` | `type Counter struct { Value int; Step int }` |
-| `value` (read) | `c.Value` |
-| `value := x` | `c.Value = x` |
+| Trashtalk | Go | Bash |
+|-----------|-----|------|
+| `instanceVars: value:0` | `type Counter struct { Value int }` | `local value=0` |
+| `value` (read) | `c.Value` | `$value` |
+| `value := x` | `c.Value = x` | `value=$x` |
 
 ### Expressions
 
-| Trashtalk | Go |
-|-----------|-----|
-| `a + b` | `a + b` |
-| `a - b` | `a - b` |
-| `a * b` | `a * b` |
-| `a / b` | `a / b` |
-| `^ value` | `return value` |
-
-### Local Variables
-
-| Trashtalk | Go |
-|-----------|-----|
-| `\| x y z \|` | `var x, y, z int` (or inferred type) |
-| `x := 5` | `x = 5` |
-
-### Message Sends
-
-| Trashtalk | Go |
-|-----------|-----|
-| `@ self increment` | `c.Increment()` |
-| `@ self setValue: 5` | `c.SetValue(5)` |
-| `@ OtherClass method` | `sendMessage("OtherClass", "method")` (shells out) |
+| Trashtalk | Go | Bash |
+|-----------|-----|------|
+| `a + b` | `a + b` | `$((a + b))` |
+| `a - b` | `a - b` | `$((a - b))` |
+| `^ value` | `return value` | `echo "$value"` |
 
 ### Control Flow
 
-| Trashtalk | Go |
-|-----------|-----|
-| `condition ifTrue: [block]` | `if condition { block }` |
-| `condition ifFalse: [block]` | `if !condition { block }` |
-| `condition ifTrue: [a] ifFalse: [b]` | `if condition { a } else { b }` |
-| `[condition] whileTrue: [block]` | `for condition { block }` |
+| Trashtalk | Go | Bash |
+|-----------|-----|------|
+| `condition ifTrue: [block]` | `if condition { block }` | `if ...; then block; fi` |
+| `[condition] whileTrue: [block]` | `for condition { block }` | `while ...; do block; done` |
+
+### Message Sends
+
+| Trashtalk | Go | Bash |
+|-----------|-----|------|
+| `@ self increment` | `c.Increment()` | direct call |
+| `@ OtherClass method` | JSON dispatch to daemon | `@ OtherClass method` |
 
 ## Type Inference
 
@@ -195,39 +195,28 @@ Trashtalk is dynamically typed; Go is statically typed. Strategy:
 
 1. **Instance variables with numeric defaults** → `int`
 2. **Instance variables with string defaults** → `string`
-3. **Instance variables with no default** → `interface{}`
+3. **Instance variables with no default** → `string` (shell semantics)
 4. **Arithmetic expressions** → `int`
 5. **String literals** → `string`
 6. **Method return types** → inferred from `^` expressions
 
-For v1, focus on numeric types. Complex types can return `interface{}` and be handled at runtime.
+## Primitive Classes
 
-## Interop: Calling Bash Classes from Go
+Built-in implementations for system classes:
 
-When Go code needs to call a Bash class:
+| Class | Purpose |
+|-------|---------|
+| String | String manipulation |
+| File | File I/O |
+| Shell | Command execution |
+| Env | Environment variables |
+| Console | Terminal I/O |
+| Array | Array operations |
+| Dictionary | Key-value operations |
+| Block | Closure execution |
+| GrpcClient | gRPC dynamic invocation |
 
-```go
-func sendMessage(receiver, selector string, args ...string) (string, error) {
-    // Build command: source trash.bash && @ receiver selector args...
-    cmd := exec.Command("bash", "-c",
-        fmt.Sprintf("source %s/lib/trash.bash && @ %s %s %s",
-            trashtalkRoot, receiver, selector, strings.Join(args, " ")))
-    output, err := cmd.Output()
-    return strings.TrimSpace(string(output)), err
-}
-```
-
-This is slow but correct. Future optimization: a persistent Bash coprocess.
-
-## Interop: Calling Go Classes from Bash
-
-Already implemented in the POC. The dispatcher in `lib/trash.bash` checks for `.native` binaries and calls them with:
-
-```bash
-$native_binary "$instance_id" "$selector" "$@"
-```
-
-Exit code 200 means "unknown selector, fall back to Bash."
+These use the `primitiveClass:` declaration and have native Go implementations in the codegen package.
 
 ## Limitations and Unsupported Features
 
@@ -245,31 +234,22 @@ When the codegen encounters unsupported constructs:
 1. **Warn** and skip the method (fall back to Bash at runtime)
 2. Or **fail** if `--strict` flag is set
 
-Example warning output:
-```
-procyon: Counter.trash
-  ✓ increment - compiled
-  ✓ decrement - compiled
-  ✓ getValue - compiled
-  ⚠ processData - skipped: contains subshell expression $(...)
-  ⚠ initialize - skipped: raw method
-
-Generated 3/5 methods. 2 will fall back to Bash.
-```
-
 ## CLI Interface
 
 ```bash
-# Basic usage - reads AST from stdin
-./driver.bash parse Counter.trash | procyon > counter/main.go
+# Bash mode - generate shell script
+./driver.bash parse Counter.trash | procyon --mode bash > Counter.bash
 
-# With options
-procyon --class Counter --output counter/ < ast.json
-procyon --strict  # fail on unsupported constructs
-procyon --dry-run # show what would be generated
+# Shared mode - generate Go source for dylib
+./driver.bash parse Counter.trash | procyon --mode shared > counter/main.go
 
-# Compile and build
-procyon < ast.json | go build -o Counter.native
+# Build shared library
+cd counter && go build -buildmode=c-shared -o Counter.so .
+
+# Options
+procyon --strict      # fail on unsupported constructs
+procyon --dry-run     # show what would be generated
+procyon --skip-vet    # skip Go validation (shared mode)
 ```
 
 ## Project Structure
@@ -277,105 +257,75 @@ procyon < ast.json | go build -o Counter.native
 ```
 procyon/
 ├── cmd/
-│   └── procyon/
-│       └── main.go           # CLI entry point
+│   ├── procyon/           # CLI entry point
+│   ├── trashtalk-daemon/  # Shared library loader
+│   └── libtrashtalk/      # C runtime library builder
+├── lib/
+│   └── runtime/           # libtrashtalk C headers
 ├── pkg/
-│   ├── ast/
-│   │   └── types.go          # Go types for AST JSON
-│   ├── parser/
-│   │   └── expr.go           # Token stream → expression parser
-│   ├── ir/
-│   │   └── ir.go             # Intermediate representation
-│   └── codegen/
-│       └── codegen.go        # IR → Go code (using jennifer)
-├── testdata/
-│   ├── counter/
-│   │   ├── input.json        # AST from parser
-│   │   └── expected.go       # Expected generated code
-│   └── ...
+│   ├── ast/               # Go types for AST JSON
+│   ├── parser/            # Token stream → expression parser
+│   ├── ir/                # Intermediate representation
+│   ├── codegen/           # Code generators
+│   │   ├── codegen.go     # Core generation logic
+│   │   ├── codegen_grpc.go    # gRPC client generation
+│   │   ├── bash_backend.go    # Bash script generator
+│   │   ├── primitives.go      # Primitive class registry
+│   │   ├── primitives_file.go # File class primitives
+│   │   ├── primitives_string.go # String class primitives
+│   │   └── primitives_shell.go  # Shell class primitives
+│   ├── bytecode/          # Block VM
+│   └── runtime/           # Go runtime helpers
+├── testdata/              # Acceptance tests
 ├── go.mod
 └── README.md
 ```
 
 ## Testing Strategy
 
-### Acceptance Tests (High-Level)
+### Acceptance Tests
 
 Each test case is a directory in `testdata/` containing:
 - `input.json` - AST from the jq parser
-- `expected.go` - Expected generated Go code
-
-The test runner:
-1. Reads `input.json`
-2. Runs it through the codegen
-3. Compares output to `expected.go`
-4. Optionally: compiles the generated code to verify it's valid Go
-
-```go
-func TestCodegen(t *testing.T) {
-    dirs, _ := filepath.Glob("testdata/*")
-    for _, dir := range dirs {
-        t.Run(filepath.Base(dir), func(t *testing.T) {
-            input := readFile(dir, "input.json")
-            expected := readFile(dir, "expected.go")
-
-            ast := ast.Parse(input)
-            actual := codegen.Generate(ast)
-
-            if actual != expected {
-                t.Errorf("mismatch:\n%s", diff(expected, actual))
-            }
-        })
-    }
-}
-```
+- `expected.go` - Expected generated Go code (shared mode)
 
 ### Unit Tests
 
-Added as we build each component:
-- `pkg/ast/` - parsing AST JSON
-- `pkg/parser/` - token stream → expression trees
-- `pkg/codegen/` - individual generation functions
+Per-component tests in each package.
 
 ### Integration Tests
 
-After M1: compile generated Counter, run against same SQLite DB as Bash version, verify identical behavior.
+End-to-end tests running compiled classes against the daemon.
 
 ## Milestones
 
-### M1: Minimal Viable Generator ✅ Complete
+### M1: Minimal Viable Generator - Complete
 - Parse AST JSON
 - Generate struct from instanceVars
-- Generate simple arithmetic methods (no control flow)
-- Generate dispatch switch
-- Embed source and hash
-- Acceptance test framework in place
+- Generate simple arithmetic methods
+- Acceptance test framework
 
-### M2: Control Flow ✅ Complete
+### M2: Control Flow - Complete
 - ifTrue:/ifFalse: → if/else
 - whileTrue: → for loops
-- Comparison operators (>, <, >=, <=, ==, !=)
-- Parenthesized expressions
+- Comparison operators
 - Early return (^)
 
-### M3: Message Sends & Traits ✅ Complete
-- @ self method → direct method call
-- @ self keyword: arg → method call with args
-- @ OtherClass method → shell out to Bash via sendMessage()
-- Trait awareness (warns when traits present, falls back to Bash)
-- Full trait inlining deferred - see docs/trait-inlining.md
+### M3: Message Sends & Traits - Complete
+- Self message sends
+- External message sends
+- Trait awareness (fall back to Bash)
 
-### M4: Namespace Support ✅ Complete
-- Handle `package:` declarations
-- Qualified class names (MyApp::Counter)
-- Correct binary naming (MyApp__Counter.native)
-- --info shows package and qualified name
-- See docs/namespace-support.md
+### M4: Namespace Support - Complete
+- Package declarations
+- Qualified class names
+- Namespaced shared library naming
 
-### M5: Class Methods ✅ Complete
-- `classMethod:` compilation to package-level functions
-- Class-level dispatch via `dispatchClass()`
-- Receiver detection (class name vs instance ID)
+### M5: Class Methods & Backends - Complete
+- Class method compilation
+- Bash backend
+- Shared library mode
+- trashtalk-daemon
 
 ### M6: Polish (Next)
 - Better error messages
@@ -385,11 +335,9 @@ After M1: compile generated Counter, run against same SQLite DB as Bash version,
 
 ## Deferred Decisions
 
-These will be decided when we encounter them, keeping the simplest working approach:
-
-1. **Trait method inlining**: Deferred - existing traits use Bash constructs. See docs/trait-inlining.md
-2. **Error handling style**: `(result, error)` vs panic/recover - decide when implementing exceptions
-3. **Complex type inference**: Start with `int` for arithmetic, `string` for strings, expand as needed
+1. **Trait method inlining**: Existing traits use Bash constructs. See docs/trait-inlining.md
+2. **Full block semantics**: Partial support via bytecode VM
+3. **Error handling style**: Currently uses Go conventions
 
 ---
 
@@ -409,21 +357,31 @@ Counter subclass: Object
   ]
 ```
 
-### Output: main.go (excerpt)
+### Output: Shared Mode (excerpt)
 
 ```go
-type Counter struct {
-    Class     string   `json:"class"`
-    CreatedAt string   `json:"created_at"`
-    Vars      []string `json:"_vars"`
-    Value     int      `json:"value"`
-    Step      int      `json:"step"`
-}
-
-func (c *Counter) Increment() int {
+//export Counter_increment
+func Counter_increment(instanceID *C.char) *C.char {
+    c := loadInstance(C.GoString(instanceID))
     var newVal int
     newVal = c.Value + c.Step
     c.Value = newVal
-    return newVal
+    saveInstance(c)
+    return C.CString(strconv.Itoa(newVal))
+}
+```
+
+### Output: Bash Mode (excerpt)
+
+```bash
+Counter__increment() {
+    local value step newVal
+    value=${_ivar_value:-0}
+    step=${_ivar_step:-1}
+
+    newVal=$((value + step))
+    value=$newVal
+    _ivar_value=$value
+    echo "$newVal"
 }
 ```

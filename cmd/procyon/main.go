@@ -17,7 +17,7 @@ var (
 	strict     = flag.Bool("strict", false, "fail on unsupported constructs instead of warning")
 	dryRun     = flag.Bool("dry-run", false, "show what would be generated without outputting")
 	version    = flag.Bool("version", false, "print version and exit")
-	mode       = flag.String("mode", "binary", "output mode: bash (Bash script), binary (Go standalone), plugin (Go c-shared library), or shared (links against libtrashtalk)")
+	mode       = flag.String("mode", "shared", "output mode: bash (Bash script) or shared (Go dylib linking against libtrashtalk)")
 	sourceFile = flag.String("source-file", "", "path to original source file for embedding (bash mode only)")
 	skipVet    = flag.Bool("skip-vet", false, "skip Go validation of generated code (plugin/shared modes)")
 )
@@ -117,16 +117,11 @@ func main() {
 		}
 		fmt.Print(code)
 		return
-	case "binary":
-		result = codegen.Generate(class)
-	case "plugin":
-		opts := codegen.GenerateOptions{SkipValidation: *skipVet}
-		result = codegen.GeneratePluginWithOptions(class, opts)
 	case "shared":
 		opts := codegen.GenerateOptions{SkipValidation: *skipVet}
 		result = codegen.GenerateSharedPluginWithOptions(class, opts)
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown mode %q (use 'bash', 'binary', 'plugin', or 'shared')\n", *mode)
+		fmt.Fprintf(os.Stderr, "Error: unknown mode %q (use 'bash' or 'shared')\n", *mode)
 		os.Exit(1)
 	}
 
