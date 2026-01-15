@@ -34,18 +34,24 @@ func GenerateSharedPluginWithOptions(class *ast.Class, opts GenerateOptions) *Re
 	// Build instance var lookup and track JSON-typed vars
 	for _, iv := range class.InstanceVars {
 		g.instanceVars[iv.Name] = true
-		defaultVal := iv.Default.Value
-		isNumeric := false
-		if len(defaultVal) > 0 {
-			isNumeric = true
-			for i, c := range defaultVal {
-				if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
-					isNumeric = false
-					break
+		// Determine if this var uses json.RawMessage (needs special handling)
+		// String and number types use native Go types, everything else uses json.RawMessage
+		isNativeType := iv.Default.Type == "string" || iv.Default.Type == "number"
+		if !isNativeType {
+			// Fallback: check if default value looks numeric (for backwards compatibility)
+			defaultVal := iv.Default.Value
+			if len(defaultVal) > 0 {
+				isNumeric := true
+				for i, c := range defaultVal {
+					if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
+						isNumeric = false
+						break
+					}
 				}
+				isNativeType = isNumeric
 			}
 		}
-		if !isNumeric {
+		if !isNativeType {
 			g.jsonVars[iv.Name] = true
 		}
 	}

@@ -51,20 +51,24 @@ func Generate(class *ast.Class) *Result {
 	// JSON vars use json.RawMessage type and need special handling for string conversion
 	for _, iv := range class.InstanceVars {
 		g.instanceVars[iv.Name] = true
-		// Check if default value is numeric - only numeric defaults use int type
-		// All other ivars use json.RawMessage (matching inferType logic)
-		defaultVal := iv.Default.Value
-		isNumeric := false
-		if len(defaultVal) > 0 {
-			isNumeric = true
-			for i, c := range defaultVal {
-				if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
-					isNumeric = false
-					break
+		// Determine if this var uses json.RawMessage (needs special handling)
+		// String and number types use native Go types, everything else uses json.RawMessage
+		isNativeType := iv.Default.Type == "string" || iv.Default.Type == "number"
+		if !isNativeType {
+			// Fallback: check if default value looks numeric (for backwards compatibility)
+			defaultVal := iv.Default.Value
+			if len(defaultVal) > 0 {
+				isNumeric := true
+				for i, c := range defaultVal {
+					if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
+						isNumeric = false
+						break
+					}
 				}
+				isNativeType = isNumeric
 			}
 		}
-		if !isNumeric {
+		if !isNativeType {
 			g.jsonVars[iv.Name] = true
 		}
 	}
@@ -215,7 +219,15 @@ func (g *generator) generateStruct(f *jen.File) {
 }
 
 func (g *generator) inferType(iv ast.InstanceVar) *jen.Statement {
-	// Check if default value is numeric - these can safely use int type
+	// Use the type from the AST if available
+	switch iv.Default.Type {
+	case "number":
+		return jen.Int()
+	case "string":
+		return jen.String()
+	}
+
+	// Fallback: check if default value looks numeric (for backwards compatibility)
 	defaultVal := iv.Default.Value
 	if len(defaultVal) > 0 {
 		isNumeric := true
@@ -232,7 +244,6 @@ func (g *generator) inferType(iv ast.InstanceVar) *jen.Statement {
 
 	// For all other instance variables, use json.RawMessage.
 	// This safely handles values that could be:
-	// - Plain strings: stored as JSON strings ("hello")
 	// - JSON arrays: stored as ["x", "y"]
 	// - JSON objects: stored as {"key": "value"}
 	// - null values

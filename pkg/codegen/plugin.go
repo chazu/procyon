@@ -34,20 +34,24 @@ func GeneratePluginWithOptions(class *ast.Class, opts GenerateOptions) *Result {
 	// JSON vars use json.RawMessage type and need special handling for string conversion
 	for _, iv := range class.InstanceVars {
 		g.instanceVars[iv.Name] = true
-		// Check if default value is numeric - only numeric defaults use int type
-		// All other ivars use json.RawMessage (matching inferType logic)
-		defaultVal := iv.Default.Value
-		isNumeric := false
-		if len(defaultVal) > 0 {
-			isNumeric = true
-			for i, c := range defaultVal {
-				if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
-					isNumeric = false
-					break
+		// Determine if this var uses json.RawMessage (needs special handling)
+		// String and number types use native Go types, everything else uses json.RawMessage
+		isNativeType := iv.Default.Type == "string" || iv.Default.Type == "number"
+		if !isNativeType {
+			// Fallback: check if default value looks numeric (for backwards compatibility)
+			defaultVal := iv.Default.Value
+			if len(defaultVal) > 0 {
+				isNumeric := true
+				for i, c := range defaultVal {
+					if !((c >= '0' && c <= '9') || (i == 0 && c == '-')) {
+						isNumeric = false
+						break
+					}
 				}
+				isNativeType = isNumeric
 			}
 		}
-		if !isNumeric {
+		if !isNativeType {
 			g.jsonVars[iv.Name] = true
 		}
 	}
