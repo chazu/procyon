@@ -22,7 +22,7 @@ var (
 	skipVet    = flag.Bool("skip-vet", false, "skip Go validation of generated code (plugin/shared modes)")
 )
 
-const versionStr = "0.7.0"
+const versionStr = "0.8.0"
 
 func main() {
 	flag.Usage = func() {
