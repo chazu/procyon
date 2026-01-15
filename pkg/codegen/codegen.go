@@ -1341,6 +1341,8 @@ func (g *generator) generateMethod(f *jen.File, m *compiledMethod) {
 		if g.generatePrimitiveMethod(f, m) {
 			return
 		}
+		// Primitive method without native implementation - skip (will fall back to bash at runtime)
+		return
 	}
 
 	// Check if method name collides with an instance variable (Go doesn't allow this)

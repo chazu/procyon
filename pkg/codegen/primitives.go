@@ -3,6 +3,8 @@
 package codegen
 
 import (
+	"strings"
+
 	"github.com/dave/jennifer/jen"
 )
 
@@ -75,51 +77,37 @@ var primitiveRegistry = map[string]map[string]bool{
 	},
 	"Block": {
 		"params_code_captured_": true,
-		"value":                 true,
-		"valueWith_":            true,
-		"valueWith_and_":        true,
 		"numArgs":               true,
+		// value, valueWith_, valueWith_and_ require eval - bash only
 	},
 	"FIFO": {
-		"at_":             true,
-		"create":          true,
-		"exists":          true,
-		"remove":          true,
-		"open":            true,
-		"close":           true,
-		"writeLine_":      true,
-		"readLine":        true,
-		"readLineTimeout_": true,
-		"startWriter_":    true,
-		"stopWriter":      true,
-		"startReader_":    true,
-		"stopReader":      true,
-		"_setPath_":       true,
+		"at_":        true,
+		"create":     true,
+		"exists":     true,
+		"remove":     true,
+		"writeLine_": true,
+		"readLine":   true,
+		"_setPath_":  true,
+		// open, close, readLineTimeout_, startWriter_, stopWriter, startReader_, stopReader
+		// require background process management - bash only
 	},
 	"Future": {
 		"for_":     true,
-		"start":    true,
-		"await":    true,
-		"poll":     true,
-		"isDone":   true,
-		"cancel":   true,
 		"status":   true,
 		"exitCode": true,
 		"cleanup":  true,
 		"help":     true,
+		// start, await, poll, isDone, cancel require process management - bash only
 	},
 	"Coproc": {
-		"for_":          true,
-		"startReadOnly": true,
-		"start":         true,
-		"readLine":      true,
-		"writeLine_":    true,
-		"isRunning":     true,
-		"terminate":     true,
-		"kill":          true,
-		"_cleanup":      true,
-		"_setCommand_":  true,
-		"_setStatus_":   true,
+		"for_":         true,
+		"isRunning":    true,
+		"terminate":    true,
+		"kill":         true,
+		"_setCommand_": true,
+		"_setStatus_":  true,
+		"_cleanup":     true,
+		// startReadOnly, start, readLine, writeLine_ require pipes - bash only
 	},
 	"String": {
 		// String tests
@@ -211,17 +199,13 @@ var primitiveRegistry = map[string]map[string]bool{
 		"asJson":     true,
 	},
 	"Object": {
-		"printString":  true,
-		"class":        true,
-		"id":           true,
-		"isKindOf_":    true,
-		"conformsTo_":  true,
-		"inspect":      true,
-		"edit":         true,
+		// new and printString have native implementations
+		// class, id, delete are handled by built-in dispatch cases
+		"new":         true,
+		"printString": true,
 	},
 	"Protocol": {
-		"requiredMethods": true,
-		"isSatisfiedBy_":  true,
+		// Protocol methods require runtime introspection - bash only for now
 	},
 	"Time": {
 		// Current time
@@ -2567,41 +2551,58 @@ func (g *generator) generatePrimitiveMethodDictionary(f *jen.File, m *compiledMe
 }
 
 // generatePrimitiveMethodObject generates native Object class methods.
+// Object is the base class - these methods work for any class through inheritance.
 func (g *generator) generatePrimitiveMethodObject(f *jen.File, m *compiledMethod) bool {
+	className := g.class.Name
+
 	switch m.selector {
+	case "new":
+		// Class method: create a new instance
+		// This is typically inherited by subclasses
+		f.Func().Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Generate instance ID"),
+			jen.Id("id").Op(":=").Lit(strings.ToLower(className)+"_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.Comment("Create instance in database"),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id(className).Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit(className),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
 	case "printString":
-		// Return "<ClassName instanceId>"
-		f.Func().Id(m.goName).Params(
-			jen.Id("receiver").String(),
-			jen.Id("className").String(),
-			jen.Id("instanceId").String(),
-		).Parens(jen.List(jen.String(), jen.Error())).Block(
-			jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("<%s %s>"), jen.Id("className"), jen.Id("instanceId")), jen.Nil()),
+		// Instance method: Return "<ClassName instanceId>"
+		f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params().Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Get instance ID from database lookup context"),
+			jen.Return(jen.Qual("fmt", "Sprintf").Call(jen.Lit("<%s instance>"), jen.Lit(className)), jen.Nil()),
 		)
 		f.Line()
 		return true
 
 	case "class":
-		// Return the class name
-		f.Func().Id(m.goName).Params(
-			jen.Id("receiver").String(),
-			jen.Id("className").String(),
-		).Parens(jen.List(jen.String(), jen.Error())).Block(
-			jen.Return(jen.Id("className"), jen.Nil()),
-		)
-		f.Line()
-		return true
+		// Handled by built-in dispatch case - no method needed
+		return false
 
 	case "id":
-		// Return the instance ID
-		f.Func().Id(m.goName).Params(
-			jen.Id("receiver").String(),
-			jen.Id("instanceId").String(),
-		).Parens(jen.List(jen.String(), jen.Error())).Block(
-			jen.Return(jen.Id("instanceId"), jen.Nil()),
-		)
-		f.Line()
-		return true
+		// Handled by built-in dispatch case - no method needed
+		return false
 
 	case "isKindOf_":
 		// Check class hierarchy - requires runtime support
@@ -2613,14 +2614,17 @@ func (g *generator) generatePrimitiveMethodObject(f *jen.File, m *compiledMethod
 		// Fall back to bash for now
 		return false
 
+	case "delete":
+		// Instance method: delete this instance from database
+		return false
+
 	case "inspect":
 		// Detailed inspection - requires runtime data access
 		// Fall back to bash for now
 		return false
 
-	case "edit":
-		// Editor integration - requires file system and process control
-		// Fall back to bash for now
+	case "inspectTo_":
+		// Inspect to specific depth
 		return false
 
 	default:
