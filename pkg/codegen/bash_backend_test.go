@@ -1877,9 +1877,9 @@ func TestBashBackend_Namespace_QualifiedParent(t *testing.T) {
 		t.Fatalf("Generate failed: %v", err)
 	}
 
-	// Parent should just be the class name (runtime handles resolution)
-	if !strings.Contains(result, `__MyApp__Counter__superclass="Collection"`) {
-		t.Error("Missing parent reference")
+	// Parent should be fully qualified when ParentPackage is set
+	if !strings.Contains(result, `__MyApp__Counter__superclass="Core::Collection"`) {
+		t.Error("Missing qualified parent reference")
 	}
 }
 
