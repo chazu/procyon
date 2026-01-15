@@ -19,6 +19,7 @@ var (
 	version    = flag.Bool("version", false, "print version and exit")
 	mode       = flag.String("mode", "binary", "output mode: bash (Bash script), binary (Go standalone), plugin (Go c-shared library), or shared (links against libtrashtalk)")
 	sourceFile = flag.String("source-file", "", "path to original source file for embedding (bash mode only)")
+	skipVet    = flag.Bool("skip-vet", false, "skip Go validation of generated code (plugin/shared modes)")
 )
 
 const versionStr = "0.7.0"
@@ -119,9 +120,11 @@ func main() {
 	case "binary":
 		result = codegen.Generate(class)
 	case "plugin":
-		result = codegen.GeneratePlugin(class)
+		opts := codegen.GenerateOptions{SkipValidation: *skipVet}
+		result = codegen.GeneratePluginWithOptions(class, opts)
 	case "shared":
-		result = codegen.GenerateSharedPlugin(class)
+		opts := codegen.GenerateOptions{SkipValidation: *skipVet}
+		result = codegen.GenerateSharedPluginWithOptions(class, opts)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown mode %q (use 'bash', 'binary', 'plugin', or 'shared')\n", *mode)
 		os.Exit(1)

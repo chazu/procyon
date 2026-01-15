@@ -13,6 +13,11 @@ import (
 // GeneratePlugin produces Go source code for a c-shared plugin.
 // The output can be built with: go build -buildmode=c-shared -o Class.so
 func GeneratePlugin(class *ast.Class) *Result {
+	return GeneratePluginWithOptions(class, GenerateOptions{})
+}
+
+// GeneratePluginWithOptions produces Go source code with configurable options.
+func GeneratePluginWithOptions(class *ast.Class, opts GenerateOptions) *Result {
 	// For primitiveClass, we generate a plugin using built-in implementations from primitiveRegistry.
 	// Each method is treated as primitive and looked up in hasPrimitiveImpl().
 
@@ -47,7 +52,77 @@ func GeneratePlugin(class *ast.Class) *Result {
 		}
 	}
 
-	return g.generatePlugin()
+	// First pass: generate code
+	result := g.generatePlugin()
+	if result.Code == "" {
+		return result
+	}
+
+	// Skip validation if requested
+	if opts.SkipValidation {
+		return result
+	}
+
+	// Validate generated Go code in-memory
+	validator := NewCodeValidator(class.Name + ".go")
+	validationErrors := validator.Validate(result.Code)
+
+	if len(validationErrors) == 0 {
+		return result
+	}
+
+	// Build goName -> selector mapping for error attribution
+	goNameToSelector := make(map[string]string)
+	for _, m := range class.Methods {
+		goName := selectorToGoName(m.Selector)
+		goNameToSelector[goName] = m.Selector
+	}
+
+	// Find selectors with errors
+	badSelectors := validator.GetMethodSelectorsWithErrors(validationErrors, goNameToSelector)
+
+	if len(badSelectors) == 0 {
+		// Errors not attributable to specific methods (package-level issues)
+		// Add validation errors as warnings
+		for _, ve := range validationErrors {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("Go validation: %s", ve.Message))
+		}
+		return result
+	}
+
+	// Add bad selectors to skippedMethods for regeneration
+	// Reset g.skipped and g.warnings - they'll be rebuilt during regeneration
+	// but also include the validation failures
+	validationSkipped := []SkippedMethod{}
+	validationWarnings := []string{}
+
+	for selector := range badSelectors {
+		g.skippedMethods[selector] = true
+		validationSkipped = append(validationSkipped, SkippedMethod{
+			Selector: selector,
+			Reason:   "Go validation failed",
+		})
+		// Find the specific error message for better diagnostics
+		for _, ve := range validationErrors {
+			if goNameToSelector[ve.Function] == selector {
+				validationWarnings = append(validationWarnings, fmt.Sprintf("%s: %s", selector, ve.Message))
+				break
+			}
+		}
+	}
+
+	// Reset state before regeneration
+	g.skipped = []SkippedMethod{}
+	g.warnings = []string{}
+
+	// Regenerate without problematic methods
+	result2 := g.generatePlugin()
+
+	// Combine: validation skipped methods + compilation skipped methods
+	result2.SkippedMethods = append(validationSkipped, result2.SkippedMethods...)
+	result2.Warnings = append(validationWarnings, result2.Warnings...)
+
+	return result2
 }
 
 func (g *generator) generatePlugin() *Result {

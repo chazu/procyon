@@ -26,6 +26,14 @@ type SkippedMethod struct {
 	Reason   string
 }
 
+// GenerateOptions controls code generation behavior.
+type GenerateOptions struct {
+	// SkipValidation disables Go type-checking of generated code.
+	// When false (default), generated code is validated and methods
+	// that produce invalid Go are automatically skipped with warnings.
+	SkipValidation bool
+}
+
 // Generate produces Go source code from a Trashtalk class AST.
 func Generate(class *ast.Class) *Result {
 	g := &generator{
@@ -965,6 +973,12 @@ func (g *generator) compileMethods() []*compiledMethod {
 	isPrimitiveClass := g.class.IsPrimitiveClass()
 
 	for _, m := range g.class.Methods {
+		// Skip methods marked for skipping (e.g., from validation failure)
+		// Don't add to g.skipped here - the caller already added them
+		if g.skippedMethods[m.Selector] {
+			continue
+		}
+
 		// Skip bashOnly methods - they should only run in Bash
 		if m.HasPragma("bashOnly") {
 			g.skipped = append(g.skipped, SkippedMethod{
@@ -2513,9 +2527,9 @@ func capitalize(s string) string {
 }
 
 func selectorToGoName(selector string) string {
-	// Remove trailing underscore and capitalize
-	name := strings.TrimSuffix(selector, "_")
-	return capitalize(name)
+	// Preserve trailing underscore - it distinguishes keyword methods (exists_)
+	// from unary methods (exists). Both map to valid Go identifiers.
+	return capitalize(selector)
 }
 
 func mustAtoi(s string) int {
@@ -3251,8 +3265,8 @@ func (g *generator) generateJSONHelpers(f *jen.File) {
 func (g *generator) generateEnvironmentMethod(f *jen.File, m *compiledMethod) {
 	switch m.selector {
 	case "get_":
-		// Get(instanceId string) (string, error) - retrieve instance data
-		f.Func().Id("Get").Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+		// Get_(instanceId string) (string, error) - retrieve instance data
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
 			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
@@ -3271,8 +3285,8 @@ func (g *generator) generateEnvironmentMethod(f *jen.File, m *compiledMethod) {
 		)
 
 	case "set_to_":
-		// Set_to(instanceId, data string) (string, error) - store instance data
-		f.Func().Id("Set_to").Params(
+		// Set_to_(instanceId, data string) (string, error) - store instance data
+		f.Func().Id(m.goName).Params(
 			jen.Id("instanceId").String(),
 			jen.Id("data").String(),
 		).Parens(jen.List(jen.String(), jen.Error())).Block(
@@ -3294,8 +3308,8 @@ func (g *generator) generateEnvironmentMethod(f *jen.File, m *compiledMethod) {
 		)
 
 	case "delete_":
-		// Delete(instanceId string) (string, error) - remove instance
-		f.Func().Id("Delete").Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+		// Delete_(instanceId string) (string, error) - remove instance
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
 			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
@@ -3313,8 +3327,8 @@ func (g *generator) generateEnvironmentMethod(f *jen.File, m *compiledMethod) {
 		)
 
 	case "findByClass_":
-		// FindByClass(className string) (string, error) - find all instances of class
-		f.Func().Id("FindByClass").Params(jen.Id("className").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+		// FindByClass_(className string) (string, error) - find all instances of class
+		f.Func().Id(m.goName).Params(jen.Id("className").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
 			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
@@ -3341,8 +3355,8 @@ func (g *generator) generateEnvironmentMethod(f *jen.File, m *compiledMethod) {
 		)
 
 	case "exists_":
-		// Exists(instanceId string) (string, error) - check if instance exists
-		f.Func().Id("Exists").Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+		// Exists_(instanceId string) (string, error) - check if instance exists
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
 			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
@@ -3388,8 +3402,8 @@ func (g *generator) generateEnvironmentMethod(f *jen.File, m *compiledMethod) {
 		)
 
 	case "countByClass_":
-		// CountByClass(className string) (string, error) - count instances of class
-		f.Func().Id("CountByClass").Params(jen.Id("className").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+		// CountByClass_(className string) (string, error) - count instances of class
+		f.Func().Id(m.goName).Params(jen.Id("className").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
 			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
