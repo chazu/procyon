@@ -867,6 +867,33 @@ func tokensToRawBash(tokens []ast.Token) string {
 				result.WriteString(" ")
 			}
 
+		case "NUMBER":
+			result.WriteString(tok.Value)
+			// Don't add space if next token is GT, LT, or REDIRECT (for redirects like 2>/dev/null, 2>&1)
+			if i+1 < len(tokens) {
+				next := tokens[i+1]
+				if next.Type != "NEWLINE" && next.Type != "GT" && next.Type != "LT" && next.Type != "REDIRECT" {
+					result.WriteString(" ")
+				}
+			}
+
+		case "REDIRECT":
+			result.WriteString(tok.Value)
+			// Don't add space after redirect operators like >& (for 2>&1)
+
+		case "GT":
+			result.WriteString(tok.Value)
+			// Don't add space after > for redirects (2>/dev/null)
+			// Check if next token is adjacent (for 2>&1, >/path)
+			if i+1 < len(tokens) {
+				next := tokens[i+1]
+				if tok.Line == next.Line && next.Col == tok.Col+1 {
+					// Adjacent, no space
+				} else if next.Type != "NEWLINE" {
+					result.WriteString(" ")
+				}
+			}
+
 		default:
 			result.WriteString(tok.Value)
 			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" && tokens[i+1].Type != "RPAREN" {
