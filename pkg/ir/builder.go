@@ -813,6 +813,8 @@ func tokensToRawBash(tokens []ast.Token) string {
 				// Common test flags: -n, -z, -e, -f, -d, -eq, -ne, -lt, -gt, -le, -ge
 				if next.Type == "IDENTIFIER" && isBashTestFlag(next.Value) {
 					// This is a test flag, don't add space
+				} else if tok.Line == next.Line && next.Col == tok.Col+1 {
+					// Adjacent, no space (for regex patterns like -?[0-9])
 				} else if next.Type != "NEWLINE" {
 					result.WriteString(" ")
 				}
@@ -821,9 +823,16 @@ func tokensToRawBash(tokens []ast.Token) string {
 		case "DSTRING", "SSTRING", "SUBSHELL", "VARIABLE":
 			// These tokens include their delimiters - just add them
 			result.WriteString(tok.Value)
-			// Add trailing space unless next is newline or end
-			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" {
-				result.WriteString(" ")
+			// Add trailing space unless next is newline, adjacent, or end
+			if i+1 < len(tokens) {
+				next := tokens[i+1]
+				// Check adjacency for glob patterns like "darwin"*
+				expectedNextCol := tok.Col + len(tok.Value)
+				if tok.Line == next.Line && next.Col == expectedNextCol {
+					// Adjacent, no space (for "darwin"*)
+				} else if next.Type != "NEWLINE" {
+					result.WriteString(" ")
+				}
 			}
 
 		case "IDENTIFIER":
@@ -869,10 +878,13 @@ func tokensToRawBash(tokens []ast.Token) string {
 
 		case "NUMBER":
 			result.WriteString(tok.Value)
-			// Don't add space if next token is GT, LT, or REDIRECT (for redirects like 2>/dev/null, 2>&1)
+			// Check adjacency for patterns like [0-9], 2>/dev/null, 2>&1
 			if i+1 < len(tokens) {
 				next := tokens[i+1]
-				if next.Type != "NEWLINE" && next.Type != "GT" && next.Type != "LT" && next.Type != "REDIRECT" {
+				expectedNextCol := tok.Col + len(tok.Value)
+				if tok.Line == next.Line && next.Col == expectedNextCol {
+					// Adjacent, no space (for [0-9], 2>/dev/null)
+				} else if next.Type != "NEWLINE" {
 					result.WriteString(" ")
 				}
 			}
@@ -896,8 +908,15 @@ func tokensToRawBash(tokens []ast.Token) string {
 
 		default:
 			result.WriteString(tok.Value)
-			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" && tokens[i+1].Type != "RPAREN" {
-				result.WriteString(" ")
+			if i+1 < len(tokens) {
+				next := tokens[i+1]
+				// Check adjacency for patterns like [0-9], ^...$, etc.
+				expectedNextCol := tok.Col + len(tok.Value)
+				if tok.Line == next.Line && next.Col == expectedNextCol {
+					// Adjacent tokens, no space
+				} else if next.Type != "NEWLINE" && next.Type != "RPAREN" {
+					result.WriteString(" ")
+				}
 			}
 		}
 	}
