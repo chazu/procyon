@@ -80,6 +80,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate native ↔ Bash selector parity for primitive classes
+	if class.IsPrimitiveClass() {
+		selectors := make([]string, len(class.Methods))
+		for i, m := range class.Methods {
+			selectors[i] = m.Selector
+		}
+		parity := codegen.ValidatePrimitiveClassParity(class.Name, selectors)
+		if parity != nil {
+			// Orphaned native implementations are errors (registry has selectors that don't exist in source)
+			if parity.HasErrors() {
+				fmt.Fprintf(os.Stderr, "Error: primitive class '%s' has native implementations for non-existent methods: %v\n",
+					class.Name, parity.OrphanedNative)
+				fmt.Fprintf(os.Stderr, "Either add these methods to the .trash source or remove them from primitiveRegistry.\n")
+				os.Exit(1)
+			}
+			// Missing native implementations are warnings (bash fallback will be used)
+			if len(parity.MissingNative) > 0 {
+				fmt.Fprintf(os.Stderr, "Warning: primitive class '%s' has methods without native implementations: %v\n",
+					class.Name, parity.MissingNative)
+				fmt.Fprintf(os.Stderr, "These methods will use Bash fallback at runtime.\n")
+			}
+		}
+	}
+
 	// Generate code based on mode
 	var result *codegen.Result
 	switch *mode {

@@ -211,6 +211,40 @@ func TestClassValidatePrimitiveClass(t *testing.T) {
 			},
 			wantError: true,
 		},
+		{
+			name: "primitive class with only raw methods is valid",
+			class: Class{
+				Name:         "Console",
+				ClassPragmas: []string{"primitiveClass"},
+				Methods: []Method{
+					{Selector: "print_", Raw: true},
+					{Selector: "error_", Raw: true},
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "primitive class with non-raw method is invalid",
+			class: Class{
+				Name:         "Console",
+				ClassPragmas: []string{"primitiveClass"},
+				Methods: []Method{
+					{Selector: "print_", Raw: true},
+					{Selector: "badMethod", Raw: false},
+				},
+			},
+			wantError: true,
+		},
+		{
+			name: "non-primitive class with non-raw methods is valid",
+			class: Class{
+				Name: "Counter",
+				Methods: []Method{
+					{Selector: "increment", Raw: false},
+				},
+			},
+			wantError: false,
+		},
 	}
 
 	for _, tt := range tests {

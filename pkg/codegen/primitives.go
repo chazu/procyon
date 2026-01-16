@@ -250,6 +250,58 @@ func hasPrimitiveImpl(className, selector string) bool {
 	return false
 }
 
+// ParityResult contains the result of validating native ↔ Bash selector parity.
+type ParityResult struct {
+	// OrphanedNative lists native implementations with no corresponding Bash method (error).
+	OrphanedNative []string
+	// MissingNative lists Bash methods without native implementations (warning).
+	MissingNative []string
+}
+
+// HasErrors returns true if there are orphaned native implementations.
+func (r *ParityResult) HasErrors() bool {
+	return len(r.OrphanedNative) > 0
+}
+
+// ValidatePrimitiveClassParity checks that a primitive class has matching selectors
+// between its Bash methods and native implementations in the primitiveRegistry.
+//
+// Returns:
+//   - ParityResult with any mismatches found
+//   - nil if the class is not in the primitiveRegistry (no validation performed)
+func ValidatePrimitiveClassParity(className string, selectors []string) *ParityResult {
+	registered := primitiveRegistry[className]
+	if registered == nil {
+		// Class not in registry - all methods will use bash fallback
+		// This is expected for new classes, not an error
+		return nil
+	}
+
+	// Build set of method selectors from .trash source
+	bashSelectors := make(map[string]bool)
+	for _, sel := range selectors {
+		bashSelectors[sel] = true
+	}
+
+	result := &ParityResult{}
+
+	// Check for native impls without corresponding bash methods (error)
+	for selector := range registered {
+		if !bashSelectors[selector] {
+			result.OrphanedNative = append(result.OrphanedNative, selector)
+		}
+	}
+
+	// Check for bash methods without native impls (warning only)
+	for _, sel := range selectors {
+		if !registered[sel] {
+			result.MissingNative = append(result.MissingNative, sel)
+		}
+	}
+
+	return result
+}
+
 // generatePrimitiveMethod generates native Go code for a primitive method.
 // Returns true if the method was handled, false to fall back to default behavior.
 func (g *generator) generatePrimitiveMethod(f *jen.File, m *compiledMethod) bool {

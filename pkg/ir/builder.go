@@ -151,17 +151,20 @@ func (b *Builder) buildMethod(m *ast.Method) Method {
 		kind = ClassMethod
 	}
 
+	// Check if class has primitiveClass pragma - all methods become raw
+	isPrimitiveClass := b.class.IsPrimitiveClass()
+
 	// Create method
 	method := Method{
 		Selector:    m.Selector,
 		Kind:        kind,
-		IsRaw:       m.Raw,
-		IsPrimitive: m.Primitive,
-		CanCompile:  !m.Raw, // Raw methods can't be compiled to Go
+		IsRaw:       m.Raw || isPrimitiveClass,
+		IsPrimitive: m.Primitive || isPrimitiveClass,
+		CanCompile:  !m.Raw && !isPrimitiveClass, // Raw/primitive methods can't be compiled to Go
 	}
 
-	// If raw method, mark it for Bash backend and capture raw body
-	if m.Raw {
+	// If raw method (or primitiveClass method), mark it for Bash backend and capture raw body
+	if m.Raw || isPrimitiveClass {
 		method.Backend = BackendBash
 		method.FallbackReason = "raw method requires Bash"
 		// Raw methods still need their arguments captured for parameter binding
