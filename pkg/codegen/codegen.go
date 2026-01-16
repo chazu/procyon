@@ -198,7 +198,11 @@ func (g *generator) generateTypeHelpers(f *jen.File) {
 		),
 	)
 	f.Line()
+}
 
+// generateBashBlockInvoker generates the bash-shelling version of invokeBlock
+// This is only used for standalone plugin mode, NOT shared mode
+func (g *generator) generateBashBlockInvoker(f *jen.File) {
 	// invokeBlock calls a Trashtalk block through the Bash runtime (Phase 2)
 	// Returns just string - errors are silently ignored to match bash behavior and simplify usage in expressions
 	f.Comment("// invokeBlock calls a Trashtalk block through the Bash runtime")

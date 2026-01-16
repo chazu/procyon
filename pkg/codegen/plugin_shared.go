@@ -833,13 +833,13 @@ func (g *generator) generateGrpcHelpersShared(f *jen.File) {
 		jen.Op("*").Qual("google.golang.org/grpc", "ClientConn"),
 		jen.Qual("context", "Context"),
 		jen.Op("*").Qual("github.com/jhump/protoreflect/desc", "MethodDescriptor"),
-		jen.Qual("github.com/jhump/protoreflect/grpcreflect", "MethodDescriptor"),
+		jen.Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "Stub"),
 		jen.Func().Params(),
 		jen.Error(),
 	)).Block(
 		jen.List(jen.Id("conn"), jen.Err()).Op(":=").Id("c").Dot("getConnection").Call(),
 		jen.If(jen.Err().Op("!=").Nil()).Block(
-			jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Err()),
+			jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "Stub").Values(), jen.Nil(), jen.Err()),
 		),
 		jen.Id("cleanup").Op(":=").Func().Params().Block(
 			jen.If(jen.String().Call(jen.Id("c").Dot("PoolConnections")).Op("!=").Lit("yes")).Block(
@@ -854,23 +854,23 @@ func (g *generator) generateGrpcHelpersShared(f *jen.File) {
 			jen.Id("parts").Op(":=").Qual("strings", "Split").Call(jen.Id("method"), jen.Lit("/")),
 			jen.If(jen.Len(jen.Id("parts")).Op("!=").Lit(2)).Block(
 				jen.Id("cleanup").Call(),
-				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("fmt", "Errorf").Call(jen.Lit("invalid method format"))),
+				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "Stub").Values(), jen.Nil(), jen.Qual("fmt", "Errorf").Call(jen.Lit("invalid method format"))),
 			),
 			jen.List(jen.Id("svcDesc"), jen.Err()).Op(":=").Id("refClient").Dot("ResolveService").Call(jen.Id("parts").Index(jen.Lit(0))),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Id("cleanup").Call(),
-				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Err()),
+				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "Stub").Values(), jen.Nil(), jen.Err()),
 			),
 			jen.Id("mtdDesc").Op("=").Id("svcDesc").Dot("FindMethodByName").Call(jen.Id("parts").Index(jen.Lit(1))),
 			jen.If(jen.Id("mtdDesc").Op("==").Nil()).Block(
 				jen.Id("cleanup").Call(),
-				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("fmt", "Errorf").Call(jen.Lit("method not found: %s"), jen.Id("method"))),
+				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "Stub").Values(), jen.Nil(), jen.Qual("fmt", "Errorf").Call(jen.Lit("method not found: %s"), jen.Id("method"))),
 			),
 		).Else().Block(
 			jen.List(jen.Id("mtdDesc"), jen.Err()).Op("=").Id("c").Dot("findMethodInProto").Call(jen.Id("method")),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Id("cleanup").Call(),
-				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Nil(), jen.Err()),
+				jen.Return(jen.Nil(), jen.Nil(), jen.Nil(), jen.Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "Stub").Values(), jen.Nil(), jen.Err()),
 			),
 		),
 		jen.Id("stub").Op(":=").Qual("github.com/jhump/protoreflect/dynamic/grpcdynamic", "NewStub").Call(jen.Id("conn")),
