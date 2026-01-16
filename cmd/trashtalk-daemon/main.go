@@ -32,6 +32,7 @@ import "C"
 
 import (
 	"bufio"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -45,6 +46,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/chazu/procyon/pkg/bytecode"
 )
 
 // Request is the JSON request from Bash
@@ -436,8 +439,7 @@ func (d *Daemon) handleBlockOp(req Request) Response {
 	case "invoke":
 		return d.handleBlockInvoke(req)
 	case "serialize":
-		// Serialize is handled by the runtime - for now return error
-		return Response{ExitCode: 1, Error: "block serialize not yet implemented in shared runtime"}
+		return d.handleBlockSerialize(req)
 	default:
 		return Response{ExitCode: 1, Error: "unknown block operation: " + req.BlockOp}
 	}
@@ -445,10 +447,95 @@ func (d *Daemon) handleBlockOp(req Request) Response {
 
 // handleBlockRegister registers a new bytecode block with the shared runtime
 func (d *Daemon) handleBlockRegister(req Request) Response {
-	// For now, we need to call into the shared runtime to register blocks
-	// This would require adding TT_RegisterBlock to the runtime API
-	// For backward compatibility, signal fallback to bash for now
-	return Response{ExitCode: 200}
+	// Decode hex-encoded bytecode
+	bytecodeBytes, err := hex.DecodeString(req.BlockData)
+	if err != nil {
+		return Response{ExitCode: 1, Error: "invalid hex bytecode: " + err.Error()}
+	}
+
+	// Deserialize bytecode into a Chunk
+	chunk, err := bytecode.Deserialize(bytecodeBytes)
+	if err != nil {
+		return Response{ExitCode: 1, Error: "failed to deserialize bytecode: " + err.Error()}
+	}
+
+	// Parse captures JSON if provided
+	var numCaptures C.int
+	var capturesPtr **C.TTValue
+
+	if req.BlockCaptures != "" && req.BlockCaptures != "[]" {
+		var captures []map[string]interface{}
+		if err := json.Unmarshal([]byte(req.BlockCaptures), &captures); err != nil {
+			return Response{ExitCode: 1, Error: "invalid captures JSON: " + err.Error()}
+		}
+
+		if len(captures) > 0 {
+			// Allocate C values for captures
+			cCaptures := make([]*C.TTValue, len(captures))
+			for i, cap := range captures {
+				val := C.TTValue{}
+				// Extract value from capture
+				if v, ok := cap["value"]; ok {
+					switch tv := v.(type) {
+					case string:
+						val._type = C.TT_TYPE_STRING
+						cStr := C.CString(tv)
+						*(**C.char)(unsafe.Pointer(&val.anon0)) = cStr
+					case float64:
+						if tv == float64(int64(tv)) {
+							val._type = C.TT_TYPE_INT
+							*(*C.int64_t)(unsafe.Pointer(&val.anon0)) = C.int64_t(int64(tv))
+						} else {
+							val._type = C.TT_TYPE_FLOAT
+							*(*C.double)(unsafe.Pointer(&val.anon0)) = C.double(tv)
+						}
+					case bool:
+						val._type = C.TT_TYPE_BOOL
+						if tv {
+							*(*C.int64_t)(unsafe.Pointer(&val.anon0)) = 1
+						} else {
+							*(*C.int64_t)(unsafe.Pointer(&val.anon0)) = 0
+						}
+					default:
+						val._type = C.TT_TYPE_NIL
+					}
+				} else {
+					val._type = C.TT_TYPE_NIL
+				}
+				cCaptures[i] = &val
+			}
+			numCaptures = C.int(len(captures))
+			capturesPtr = &cCaptures[0]
+		}
+	}
+
+	// Serialize the chunk for the C API
+	serialized, err := chunk.Serialize()
+	if err != nil {
+		return Response{ExitCode: 1, Error: "failed to serialize chunk: " + err.Error()}
+	}
+
+	// Call TT_RegisterBlock
+	cBlockID := C.TT_RegisterBlock(
+		(*C.uint8_t)(unsafe.Pointer(&serialized[0])),
+		C.size_t(len(serialized)),
+		capturesPtr,
+		numCaptures,
+	)
+
+	if cBlockID == nil {
+		return Response{ExitCode: 1, Error: "TT_RegisterBlock returned nil"}
+	}
+
+	blockID := C.GoString(cBlockID)
+	C.free(unsafe.Pointer(cBlockID))
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: registered block %s (%d bytes, %d captures)\n",
+			blockID, len(serialized), numCaptures)
+	}
+
+	return Response{ExitCode: 0, BlockID: blockID}
 }
 
 // handleBlockInvoke invokes a registered bytecode block via TT_InvokeBlock
@@ -516,4 +603,61 @@ func (d *Daemon) handleBlockInvoke(req Request) Response {
 	}
 
 	return Response{ExitCode: 0, Result: resultStr}
+}
+
+// handleBlockSerialize serializes a block for cross-process transfer
+func (d *Daemon) handleBlockSerialize(req Request) Response {
+	if req.BlockID == "" {
+		return Response{ExitCode: 1, Error: "block_id is required"}
+	}
+
+	// Look up the block via C API
+	cBlockID := C.CString(req.BlockID)
+	defer C.free(unsafe.Pointer(cBlockID))
+
+	cBlock := C.TT_LookupBlock(cBlockID)
+	if cBlock == nil {
+		return Response{ExitCode: 1, Error: "block not found: " + req.BlockID}
+	}
+
+	// Cast to Go Block type to access fields
+	// Note: This works because TTBlock is typedef'd from the Go Block struct
+	type goBlock struct {
+		ID         string
+		Chunk      *bytecode.Chunk
+		Captures   []interface{} // Actually []*CaptureCell but we just need the data
+		InstanceID string
+		ClassName  string
+	}
+	block := (*goBlock)(unsafe.Pointer(cBlock))
+
+	if block.Chunk == nil {
+		return Response{ExitCode: 1, Error: "block has no bytecode chunk"}
+	}
+
+	// Serialize the bytecode
+	bytecodeBytes, err := block.Chunk.Serialize()
+	if err != nil {
+		return Response{ExitCode: 1, Error: "failed to serialize bytecode: " + err.Error()}
+	}
+
+	// Hex-encode the bytecode
+	hexBytecode := hex.EncodeToString(bytecodeBytes)
+
+	// Serialize captures to JSON
+	// For now, we'll serialize capture values as a simple array
+	capturesJSON := "[]"
+	// TODO: Implement full capture serialization if needed
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: serialized block %s (%d bytes)\n",
+			req.BlockID, len(bytecodeBytes))
+	}
+
+	return Response{
+		ExitCode:  0,
+		BlockID:   req.BlockID,
+		BlockData: hexBytecode,
+		Result:    capturesJSON,
+	}
 }

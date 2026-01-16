@@ -68,6 +68,7 @@ import "C"
 import (
 	"unsafe"
 
+	"github.com/chazu/procyon/pkg/bytecode"
 	runtime "github.com/chazu/procyon/lib/runtime"
 )
 
@@ -322,6 +323,47 @@ func TT_SendDirect(inst *C.TTInstance, selector *C.char, args *C.TTValue, numArg
 // ============================================================================
 // Block Operations
 // ============================================================================
+
+//export TT_RegisterBlock
+func TT_RegisterBlock(bytecodeData *C.uint8_t, bytecodeLen C.size_t, captures **C.TTValue, numCaptures C.int) *C.char {
+	r := runtime.GlobalRuntime()
+	if r == nil {
+		return nil
+	}
+
+	// Convert bytecode bytes to Go slice
+	goBytes := C.GoBytes(unsafe.Pointer(bytecodeData), C.int(bytecodeLen))
+
+	// Deserialize bytecode
+	chunk, err := bytecode.Deserialize(goBytes)
+	if err != nil {
+		return nil
+	}
+
+	// Convert captures if provided
+	var goCaptures []*runtime.CaptureCell
+	if captures != nil && numCaptures > 0 {
+		cCaptures := unsafe.Slice(captures, int(numCaptures))
+		goCaptures = make([]*runtime.CaptureCell, int(numCaptures))
+		for i, capPtr := range cCaptures {
+			if capPtr != nil {
+				val := valueFromC(*capPtr)
+				goCaptures[i] = &runtime.CaptureCell{
+					Value: val,
+				}
+			}
+		}
+	}
+
+	// Register the block
+	blockID := r.RegisterBlock(chunk, goCaptures, "", "")
+
+	if blockID == "" {
+		return nil
+	}
+
+	return C.CString(blockID)
+}
 
 //export TT_LookupBlock
 func TT_LookupBlock(blockID *C.char) *C.TTBlock {
