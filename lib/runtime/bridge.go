@@ -1,17 +1,28 @@
 package runtime
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
-// BashBridge handles fallback to Bash runtime for methods not implemented natively
+// BashBridge handles fallback to Bash runtime for methods not implemented natively.
+// It maintains a persistent bash subprocess with trash.bash already sourced,
+// avoiding the overhead of forking and sourcing on every call.
 type BashBridge struct {
 	trashDir string // Path to ~/.trashtalk
 	debug    bool
+
+	// Persistent bash process
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Reader
+	mu     sync.Mutex // Protects access to the persistent process
 }
 
 // NewBashBridge creates a new bash bridge
@@ -40,14 +51,145 @@ func (bb *BashBridge) SetDebug(debug bool) {
 	bb.debug = debug
 }
 
+// Close shuts down the persistent bash process
+func (bb *BashBridge) Close() error {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+
+	if bb.cmd != nil {
+		bb.stdin.Close()
+		bb.cmd.Wait()
+		bb.cmd = nil
+	}
+	return nil
+}
+
+// ensureProcess starts the persistent bash process if not already running
+func (bb *BashBridge) ensureProcess() error {
+	if bb.cmd != nil {
+		return nil
+	}
+
+	trashBash := filepath.Join(bb.trashDir, "lib", "trash.bash")
+
+	// Start bash in interactive-like mode, sourcing trash.bash
+	bb.cmd = exec.Command("bash")
+	bb.cmd.Stderr = os.Stderr
+
+	var err error
+	bb.stdin, err = bb.cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("creating stdin pipe: %w", err)
+	}
+
+	stdout, err := bb.cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("creating stdout pipe: %w", err)
+	}
+	bb.stdout = bufio.NewReader(stdout)
+
+	if err := bb.cmd.Start(); err != nil {
+		return fmt.Errorf("starting bash: %w", err)
+	}
+
+	// Source trash.bash once
+	initCmd := fmt.Sprintf("source %q\n", trashBash)
+	if _, err := bb.stdin.Write([]byte(initCmd)); err != nil {
+		bb.cmd.Process.Kill()
+		bb.cmd = nil
+		return fmt.Errorf("sourcing trash.bash: %w", err)
+	}
+
+	// Send a marker to confirm initialization
+	marker := "__BASH_BRIDGE_READY__"
+	if _, err := bb.stdin.Write([]byte(fmt.Sprintf("echo %s\n", marker))); err != nil {
+		bb.cmd.Process.Kill()
+		bb.cmd = nil
+		return fmt.Errorf("sending ready marker: %w", err)
+	}
+
+	// Read until we see the marker
+	for {
+		line, err := bb.stdout.ReadString('\n')
+		if err != nil {
+			bb.cmd.Process.Kill()
+			bb.cmd = nil
+			return fmt.Errorf("waiting for ready marker: %w", err)
+		}
+		if strings.TrimSpace(line) == marker {
+			break
+		}
+	}
+
+	if bb.debug {
+		fmt.Fprintf(os.Stderr, "BashBridge: persistent process started (pid %d)\n", bb.cmd.Process.Pid)
+	}
+
+	return nil
+}
+
+// execCommand runs a command in the persistent bash process and returns the output
+func (bb *BashBridge) execCommand(bashCmd string) (string, int, error) {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+
+	if err := bb.ensureProcess(); err != nil {
+		return "", 1, err
+	}
+
+	// Use a unique marker to detect end of output
+	// Format: __END_MARKER_<exitcode>__
+	marker := "__BASH_BRIDGE_END__"
+
+	// Run the command, capture exit code, then echo marker with exit code
+	fullCmd := fmt.Sprintf("{ %s; }; __bb_exit=$?; echo \"%s${__bb_exit}__\"\n", bashCmd, marker)
+
+	if bb.debug {
+		fmt.Fprintf(os.Stderr, "BashBridge: exec: %s", fullCmd)
+	}
+
+	if _, err := bb.stdin.Write([]byte(fullCmd)); err != nil {
+		// Process may have died, try to restart on next call
+		bb.cmd = nil
+		return "", 1, fmt.Errorf("writing command: %w", err)
+	}
+
+	// Read output until we see the marker
+	var output strings.Builder
+	var exitCode int
+	for {
+		line, err := bb.stdout.ReadString('\n')
+		if err != nil {
+			bb.cmd = nil
+			return "", 1, fmt.Errorf("reading output: %w", err)
+		}
+
+		line = strings.TrimSuffix(line, "\n")
+
+		// Check for end marker
+		if strings.HasPrefix(line, marker) {
+			// Parse exit code from marker
+			exitStr := strings.TrimPrefix(line, marker)
+			exitStr = strings.TrimSuffix(exitStr, "__")
+			fmt.Sscanf(exitStr, "%d", &exitCode)
+			break
+		}
+
+		if output.Len() > 0 {
+			output.WriteString("\n")
+		}
+		output.WriteString(line)
+	}
+
+	return output.String(), exitCode, nil
+}
+
 // Fallback dispatches a message through the Bash runtime
 // This is used when:
 // - A method is marked bashOnly
 // - A class isn't registered natively
 // - A method isn't found in the native dispatch table
 func (bb *BashBridge) Fallback(receiver string, selector string, args []Value) Value {
-	trashBash := filepath.Join(bb.trashDir, "lib", "trash.bash")
-
 	// Quote each argument to handle spaces and special characters
 	quotedArgs := make([]string, len(args))
 	for i, arg := range args {
@@ -59,35 +201,25 @@ func (bb *BashBridge) Fallback(receiver string, selector string, args []Value) V
 		argsStr = " " + strings.Join(quotedArgs, " ")
 	}
 
-	// Build the bash command
-	bashCmd := fmt.Sprintf(
-		"source %q && @ %s %s%s",
-		trashBash,
-		receiver,
-		selector,
-		argsStr,
-	)
+	// Build the bash command (trash.bash is already sourced)
+	bashCmd := fmt.Sprintf("@ %s %s%s", receiver, selector, argsStr)
 
 	if bb.debug {
-		fmt.Fprintf(os.Stderr, "BashBridge: bash -c %q\n", bashCmd)
+		fmt.Fprintf(os.Stderr, "BashBridge: %s\n", bashCmd)
 	}
 
-	cmd := exec.Command("bash", "-c", bashCmd)
-	cmd.Stderr = os.Stderr // Let errors pass through
-
-	output, err := cmd.Output()
+	result, exitCode, err := bb.execCommand(bashCmd)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Exit code 200 means "method not found"
-			if exitErr.ExitCode() == 200 {
-				return ErrorValue(fmt.Sprintf("unknown method: %s %s", receiver, selector))
-			}
-			return ErrorValue(fmt.Sprintf("bash error (exit %d): %s", exitErr.ExitCode(), string(exitErr.Stderr)))
-		}
-		return ErrorValue(fmt.Sprintf("bash failed: %v", err))
+		return ErrorValue(fmt.Sprintf("bash bridge error: %v", err))
 	}
 
-	result := strings.TrimSuffix(string(output), "\n")
+	// Exit code 200 means "method not found"
+	if exitCode == 200 {
+		return ErrorValue(fmt.Sprintf("unknown method: %s %s", receiver, selector))
+	}
+	if exitCode != 0 {
+		return ErrorValue(fmt.Sprintf("bash error (exit %d)", exitCode))
+	}
 
 	if bb.debug {
 		fmt.Fprintf(os.Stderr, "BashBridge: result=%q\n", result)
@@ -108,8 +240,6 @@ func (bb *BashBridge) FallbackInstanceMethod(instanceID string, selector string,
 
 // InvokeBashBlock invokes a Bash-based block by its ID
 func (bb *BashBridge) InvokeBashBlock(blockID string, args []Value) Value {
-	trashBash := filepath.Join(bb.trashDir, "lib", "trash.bash")
-
 	// Quote arguments
 	quotedArgs := make([]string, len(args))
 	for i, arg := range args {
@@ -122,49 +252,38 @@ func (bb *BashBridge) InvokeBashBlock(blockID string, args []Value) Value {
 	}
 
 	// Invoke block via @ blockID value args...
-	bashCmd := fmt.Sprintf(
-		"source %q && @ %s value%s",
-		trashBash,
-		blockID,
-		argsStr,
-	)
+	bashCmd := fmt.Sprintf("@ %s value%s", blockID, argsStr)
 
 	if bb.debug {
-		fmt.Fprintf(os.Stderr, "BashBridge: block invoke: bash -c %q\n", bashCmd)
+		fmt.Fprintf(os.Stderr, "BashBridge: block invoke: %s\n", bashCmd)
 	}
 
-	cmd := exec.Command("bash", "-c", bashCmd)
-	cmd.Stderr = os.Stderr
-
-	output, err := cmd.Output()
+	result, exitCode, err := bb.execCommand(bashCmd)
 	if err != nil {
 		return ErrorValue(fmt.Sprintf("block invocation failed: %v", err))
 	}
+	if exitCode != 0 {
+		return ErrorValue(fmt.Sprintf("block invocation failed (exit %d)", exitCode))
+	}
 
-	return StringValue(strings.TrimSuffix(string(output), "\n"))
+	return StringValue(result)
 }
 
 // Eval evaluates a Trashtalk expression through the Bash runtime
 func (bb *BashBridge) Eval(code string) Value {
-	trashBash := filepath.Join(bb.trashDir, "lib", "trash.bash")
-
-	bashCmd := fmt.Sprintf(
-		"source %q && @ Trash eval: %q",
-		trashBash,
-		code,
-	)
+	bashCmd := fmt.Sprintf("@ Trash eval: %q", code)
 
 	if bb.debug {
-		fmt.Fprintf(os.Stderr, "BashBridge: eval: bash -c %q\n", bashCmd)
+		fmt.Fprintf(os.Stderr, "BashBridge: eval: %s\n", bashCmd)
 	}
 
-	cmd := exec.Command("bash", "-c", bashCmd)
-	cmd.Stderr = os.Stderr
-
-	output, err := cmd.Output()
+	result, exitCode, err := bb.execCommand(bashCmd)
 	if err != nil {
 		return ErrorValue(fmt.Sprintf("eval failed: %v", err))
 	}
+	if exitCode != 0 {
+		return ErrorValue(fmt.Sprintf("eval failed (exit %d)", exitCode))
+	}
 
-	return StringValue(strings.TrimSuffix(string(output), "\n"))
+	return StringValue(result)
 }

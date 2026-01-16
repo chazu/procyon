@@ -105,6 +105,10 @@ func (r *Runtime) Close() error {
 		r.Persistence.Close()
 	}
 
+	if r.BashBridge != nil {
+		r.BashBridge.Close()
+	}
+
 	r.BlockRunner.ClearRegistry()
 	r.initialized = false
 	return nil
