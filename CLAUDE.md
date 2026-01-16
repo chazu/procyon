@@ -6,30 +6,6 @@ Context for Claude Code when working on Procyon.
 
 Procyon is a Go code generator for Trashtalk. It takes AST JSON from Trashtalk's jq-based parser and generates either Bash scripts or Go shared libraries that integrate with the Trashtalk runtime.
 
-**Key insight**: This is an experiment. Bash remains the primary Trashtalk runtime. Native compilation is an optimization, not a replacement.
-
-## Repository Structure
-
-```
-procyon/
-├── cmd/
-│   ├── procyon/           # CLI - reads AST JSON from stdin, writes code to stdout
-│   ├── trashtalk-daemon/  # Shared library loader daemon
-│   └── libtrashtalk/      # C runtime library
-├── lib/
-│   └── runtime/           # libtrashtalk headers
-├── pkg/
-│   ├── ast/               # Types matching jq parser output + JSON parsing
-│   ├── parser/            # Token stream → expression tree (method bodies)
-│   ├── ir/                # Intermediate representation
-│   ├── codegen/           # Code generators (Bash backend, Shared lib mode)
-│   ├── bytecode/          # Block VM for closure execution
-│   └── runtime/           # Go runtime helpers
-├── testdata/              # Acceptance test cases
-├── DESIGN.md              # Full design document
-└── README.md              # User documentation
-```
-
 ## Output Modes
 
 Procyon supports two output modes:
@@ -65,7 +41,7 @@ go build -buildmode=c-shared -o ~/.trashtalk/plugins/Counter.so counter/main.go
 3. For shared mode: `go build -buildmode=c-shared` → compiles to dylib
 4. trashtalk-daemon loads dylibs on demand
 
-## Key Design Decisions
+## Key Design Decisions (May be out of date)
 
 1. **Token stream parsing in Go**: The jq parser outputs method bodies as token streams, not expression trees. We parse these in Go rather than extending jq.
 
@@ -73,50 +49,94 @@ go build -buildmode=c-shared -o ~/.trashtalk/plugins/Counter.so counter/main.go
 
 3. **Two backends**: Bash for debugging/compatibility, shared libs for performance.
 
-4. **trashtalk-daemon**: Loads shared libraries on demand, dispatches via JSON protocol over Unix socket.
+4. **trashtalk-daemon**: Loads shared libraries on demand
 
 5. **libtrashtalk**: C runtime library providing instance storage and method registration.
 
-## Current Capabilities (M1-M5)
+## Issue Tracking
 
-**Compiles:**
-- Instance variable access/assignment
-- Local variable declarations (`| x y |`)
-- Binary arithmetic (`+`, `-`, `*`, `/`)
-- Comparison operators (`>`, `<`, `>=`, `<=`, `==`, `!=`)
-- Control flow (`ifTrue:`, `ifFalse:`, `ifTrue:ifFalse:`)
-- While loops (`whileTrue:`)
-- Parenthesized expressions
-- Return statements (`^`)
-- Methods with arguments (string → int conversion)
-- Self message sends (`@ self method`, `@ self keyword: arg`)
-- External message sends (`@ OtherClass method`)
-- Namespaced classes (`package: MyApp`)
-- Class methods (`classMethod:` → package-level Go functions)
-- Primitive classes (String, File, Shell, Env, Console, Array, Dictionary, GrpcClient)
+We use bd (beads) for issue tracking instead of Markdown TODOs or external tools.
 
-**Falls back to Bash:**
-- `new` method (uses subshells)
-- Trait methods (inlining not yet implemented)
-- Raw methods
-- Subshell expressions (`$(...)`)
-
-## Testing
+### Quick Reference
 
 ```bash
-go test ./pkg/codegen/... -v    # Acceptance tests
-go test ./...                    # All tests
+# Find ready work (no blockers)
+bd ready --json
+
+# Find ready work including future deferred issues
+bd ready --include-deferred --json
+
+# Create new issue
+bd create "Issue title" -t bug|feature|task -p 0-4 -d "Description" --json
+
+# Create issue with due date and defer (GH#820)
+bd create "Task" --due=+6h              # Due in 6 hours
+bd create "Task" --defer=tomorrow       # Hidden from bd ready until tomorrow
+bd create "Task" --due="next monday" --defer=+1h  # Both
+
+# Update issue status
+bd update <id> --status in_progress --json
+
+# Update issue with due/defer dates
+bd update <id> --due=+2d                # Set due date
+bd update <id> --defer=""               # Clear defer (show immediately)
+
+# Link discovered work
+bd dep add <discovered-id> <parent-id> --type discovered-from
+
+# Complete work
+bd close <id> --reason "Done" --json
+
+# Show dependency tree
+bd dep tree <id>
+
+# Get issue details
+bd show <id> --json
+
+# Query issues by time-based scheduling (GH#820)
+bd list --deferred              # Show issues with defer_until set
+bd list --defer-before=tomorrow # Deferred before tomorrow
+bd list --defer-after=+1w       # Deferred after one week from now
+bd list --due-before=+2d        # Due within 2 days
+bd list --due-after="next monday" # Due after next Monday
+bd list --overdue               # Due date in past (not closed)
 ```
 
-Acceptance tests compare generated code against `testdata/*/expected.go`.
+### Workflow
 
-## Next Steps (M6)
+1. **Check for ready work**: Run `bd ready` to see what's unblocked
+2. **Claim your task**: `bd update <id> --status in_progress`
+3. **Work on it**: Implement, test, document
+4. **Discover new work**: If you find bugs or TODOs, create issues:
+   - `bd create "Found bug in auth" -t bug -p 1 --json`
+   - Link it: `bd dep add <new-id> <current-id> --type discovered-from`
+5. **Complete**: `bd close <id> --reason "Implemented"`
+6. **Export**: Run `bd export -o .beads/issues.jsonl` before committing
 
-See DESIGN.md for the full roadmap. Key upcoming work:
+### Issue Types
 
-1. **Polish (M6)**: Better error messages, `--strict` mode improvements, documentation
+- `bug` - Something broken that needs fixing
+- `feature` - New functionality
+- `task` - Work item (tests, docs, refactoring)
+- `epic` - Large feature composed of multiple issues
+- `chore` - Maintenance work (dependencies, tooling)
 
-**Note**: Trait method inlining is deferred - existing traits use Bash-specific constructs that can't compile to Go. See docs/trait-inlining.md for the planned approach when needed.
+### Priorities
+
+- `0` - Critical (security, data loss, broken builds)
+- `1` - High (major features, important bugs)
+- `2` - Medium (nice-to-have features, minor bugs)
+- `3` - Low (polish, optimization)
+- `4` - Backlog (future ideas)
+
+### Dependency Types
+
+- `blocks` - Hard dependency (issue X blocks issue Y)
+- `related` - Soft relationship (issues are connected)
+- `parent-child` - Epic/subtask relationship
+- `discovered-from` - Track issues discovered during work
+
+Only `blocks` dependencies affect the ready work queue.
 
 ## Common Tasks
 
