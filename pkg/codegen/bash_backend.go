@@ -304,8 +304,13 @@ func (b *BashBackend) generateExprStmt(s *ir.ExprStmt) error {
 		return err
 	}
 
-	// If it's a message send, we need to invoke it
+	// If it's a message send used as a statement (for side effects),
+	// we need to strip the $() wrapper to avoid executing the return value
 	if _, ok := s.Expr.(*ir.MessageSendExpr); ok {
+		// Strip the $(...) wrapper if present
+		if strings.HasPrefix(exprStr, "$(") && strings.HasSuffix(exprStr, ")") {
+			exprStr = exprStr[2 : len(exprStr)-1]
+		}
 		b.writef("%s\n", exprStr)
 	} else {
 		// Other expressions that have side effects
@@ -436,6 +441,18 @@ func (b *BashBackend) generateCondition(expr ir.Expression) (string, error) {
 			return "false", nil
 		}
 		return b.generateExpr(expr)
+	case *ir.JSONPrimitiveExpr:
+		// JSON primitives that return "true"/"false" strings need special handling
+		exprStr, err := b.generateExpr(expr)
+		if err != nil {
+			return "", err
+		}
+		if e.Operation == "objectHasKey" || e.Operation == "objectIsEmpty" || e.Operation == "arrayIsEmpty" {
+			// Compare against "true" string since jq outputs true/false as strings
+			return fmt.Sprintf("[[ \"%s\" == \"true\" ]]", exprStr), nil
+		}
+		// For other JSON primitives, use -n test
+		return fmt.Sprintf("[[ -n \"%s\" ]]", exprStr), nil
 	default:
 		// For other expressions, wrap in test
 		exprStr, err := b.generateExpr(expr)

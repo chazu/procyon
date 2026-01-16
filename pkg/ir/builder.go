@@ -356,7 +356,19 @@ func (b *Builder) buildIfStmt(i *parser.IfExpr, scope *Scope) (Statement, Backen
 
 // buildWhileStmt converts a parser while expression to an IR while statement.
 func (b *Builder) buildWhileStmt(w *parser.WhileExpr, scope *Scope) (Statement, Backend, string) {
-	condition, condBackend, condReason := b.buildExpr(w.Condition, scope)
+	// If condition is a block (e.g., [i < len] whileTrue: [...]), extract the inner expression
+	// Otherwise the block wrapper causes incorrect code generation
+	var condition Expression
+	var condBackend Backend
+	var condReason string
+
+	if block, ok := w.Condition.(*parser.BlockExpr); ok {
+		// Extract the expression from the block's statements
+		condition, condBackend, condReason = b.extractBlockExpr(block.Statements, scope)
+	} else {
+		condition, condBackend, condReason = b.buildExpr(w.Condition, scope)
+	}
+
 	body, bodyBackend, bodyReason := b.buildStatements(w.Body, scope)
 
 	backend := condBackend
