@@ -2,6 +2,7 @@ package bytecode
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 )
 
@@ -2231,6 +2232,35 @@ func TestVMJSONObjectAtPutReplace(t *testing.T) {
 	expected := `{"name":"new","count":1}`
 	if result != expected {
 		t.Errorf("Expected %q, got %q", expected, result)
+	}
+}
+
+// TestVMJSONObjectAtPutKeyInValue tests OBJECT_AT_PUT when the key appears inside a string value
+// This is a regression test for the bug where strings.Index would match keys inside values
+func TestVMJSONObjectAtPutKeyInValue(t *testing.T) {
+	chunk := NewChunk()
+	// The key "name" appears inside the "desc" value - should not match there
+	objIdx := chunk.AddConstant(`{"desc":"the key \"name\": is here","name":"old"}`)
+	keyIdx := chunk.AddConstant("name")
+	valIdx := chunk.AddConstant("new")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(objIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(keyIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(valIdx)...)
+	chunk.Emit(OpObjectAtPut)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Result should have the actual "name" key replaced, not the one inside "desc"
+	if !strings.Contains(result, `"name":"new"`) {
+		t.Errorf("Expected name to be 'new', got %q", result)
+	}
+	if !strings.Contains(result, `"desc":"the key \"name\": is here"`) {
+		t.Errorf("Expected desc to be unchanged, got %q", result)
 	}
 }
 

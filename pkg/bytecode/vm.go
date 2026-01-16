@@ -1038,6 +1038,57 @@ func jsonObjectAt(obj string, key string) string {
 	return unquoteJSON(value)
 }
 
+// findJSONKey finds the position of a JSON key in an object string,
+// ensuring we only match actual keys (not keys that appear inside string values).
+// Returns -1 if not found.
+func findJSONKey(obj string, searchKey string) int {
+	inString := false
+	escaped := false
+	depth := 0
+
+	for i := 0; i < len(obj); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		c := obj[i]
+
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+
+		if c == '"' && !inString {
+			// Starting a string - check if this could be our key
+			// We're at depth 1 (inside the main object) and not in a string
+			if depth == 1 && i+len(searchKey) <= len(obj) {
+				if obj[i:i+len(searchKey)] == searchKey {
+					return i
+				}
+			}
+			inString = true
+			continue
+		}
+
+		if c == '"' && inString {
+			inString = false
+			continue
+		}
+
+		if inString {
+			continue
+		}
+
+		// Track nested objects/arrays
+		if c == '{' || c == '[' {
+			depth++
+		} else if c == '}' || c == ']' {
+			depth--
+		}
+	}
+	return -1
+}
+
 func jsonObjectAtPut(obj string, key string, value string) string {
 	obj = strings.TrimSpace(obj)
 	quotedKey := quoteJSON(key)
@@ -1047,9 +1098,9 @@ func jsonObjectAtPut(obj string, key string, value string) string {
 		return "{" + quotedKey + ":" + quotedValue + "}"
 	}
 
-	// Check if key exists
+	// Find key position, ensuring we match only actual keys (not inside string values)
 	searchKey := quotedKey + ":"
-	idx := strings.Index(obj, searchKey)
+	idx := findJSONKey(obj, searchKey)
 	if idx >= 0 {
 		// Key exists - replace its value
 		valueStart := idx + len(searchKey)
