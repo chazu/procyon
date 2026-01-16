@@ -554,9 +554,10 @@ func (p *Parser) parseIfNotNil(subject Expr) (Statement, error) {
 	}, nil
 }
 
-// parseDoIteration parses: collection do: [:item | body] or collection do: blockVar
-func (p *Parser) parseDoIteration(collection Expr) (Statement, error) {
-	p.advance() // consume "do:"
+// parseIteration parses: collection <kind>: [:item | body] or collection <kind>: blockVar
+// kind should be "do", "collect", or "select"
+func (p *Parser) parseIteration(collection Expr, kind string) (Statement, error) {
+	p.advance() // consume the keyword (e.g., "do:", "collect:", "select:")
 
 	// Check if we have a block literal or a variable
 	if p.peek().Type == ast.TokenLBracket {
@@ -567,14 +568,14 @@ func (p *Parser) parseDoIteration(collection Expr) (Statement, error) {
 		}
 
 		if len(block.Params) != 1 {
-			return nil, fmt.Errorf("do: block must have exactly one parameter, got %d", len(block.Params))
+			return nil, fmt.Errorf("%s: block must have exactly one parameter, got %d", kind, len(block.Params))
 		}
 
 		return &IterationExpr{
 			Collection: collection,
 			IterVar:    block.Params[0],
 			Body:       block.Statements,
-			Kind:       "do",
+			Kind:       kind,
 		}, nil
 	}
 
@@ -587,82 +588,23 @@ func (p *Parser) parseDoIteration(collection Expr) (Statement, error) {
 	return &DynamicIterationExpr{
 		Collection: collection,
 		BlockVar:   blockVar,
-		Kind:       "do",
+		Kind:       kind,
 	}, nil
+}
+
+// parseDoIteration parses: collection do: [:item | body] or collection do: blockVar
+func (p *Parser) parseDoIteration(collection Expr) (Statement, error) {
+	return p.parseIteration(collection, "do")
 }
 
 // parseCollectIteration parses: collection collect: [:item | expr] or collection collect: blockVar
 func (p *Parser) parseCollectIteration(collection Expr) (Statement, error) {
-	p.advance() // consume "collect:"
-
-	// Check if we have a block literal or a variable
-	if p.peek().Type == ast.TokenLBracket {
-		// Block literal - inline the iteration
-		block, err := p.parseBlockExpr()
-		if err != nil {
-			return nil, err
-		}
-
-		if len(block.Params) != 1 {
-			return nil, fmt.Errorf("collect: block must have exactly one parameter, got %d", len(block.Params))
-		}
-
-		return &IterationExpr{
-			Collection: collection,
-			IterVar:    block.Params[0],
-			Body:       block.Statements,
-			Kind:       "collect",
-		}, nil
-	}
-
-	// Block variable - dynamic iteration (Phase 2)
-	blockVar, err := p.parseMessageArg()
-	if err != nil {
-		return nil, err
-	}
-
-	return &DynamicIterationExpr{
-		Collection: collection,
-		BlockVar:   blockVar,
-		Kind:       "collect",
-	}, nil
+	return p.parseIteration(collection, "collect")
 }
 
 // parseSelectIteration parses: collection select: [:item | condition] or collection select: blockVar
 func (p *Parser) parseSelectIteration(collection Expr) (Statement, error) {
-	p.advance() // consume "select:"
-
-	// Check if we have a block literal or a variable
-	if p.peek().Type == ast.TokenLBracket {
-		// Block literal - inline the iteration
-		block, err := p.parseBlockExpr()
-		if err != nil {
-			return nil, err
-		}
-
-		if len(block.Params) != 1 {
-			return nil, fmt.Errorf("select: block must have exactly one parameter, got %d", len(block.Params))
-		}
-
-		return &IterationExpr{
-			Collection: collection,
-			IterVar:    block.Params[0],
-			Body:       block.Statements,
-			Kind:       "select",
-		}, nil
-	}
-
-	// Block variable - dynamic iteration (Phase 2)
-	blockVar, err := p.parseMessageArg()
-	if err != nil {
-		return nil, err
-	}
-
-	return &DynamicIterationExpr{
-		Collection: collection,
-		BlockVar:   blockVar,
-		Kind:       "select",
-	}, nil
+	return p.parseIteration(collection, "select")
 }
 
 // parseBlock parses: [statements] (for control flow)
