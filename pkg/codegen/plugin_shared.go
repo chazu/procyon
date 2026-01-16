@@ -28,7 +28,7 @@ func GenerateSharedPluginWithOptions(class *ast.Class, opts GenerateOptions) *Re
 		skipped:        []SkippedMethod{},
 		instanceVars:   map[string]bool{},
 		jsonVars:       map[string]bool{},
-		skippedMethods: map[string]bool{},
+		skippedMethods: map[string]string{},
 	}
 
 	// Build instance var lookup and track JSON-typed vars
@@ -88,7 +88,7 @@ func GenerateSharedPluginWithOptions(class *ast.Class, opts GenerateOptions) *Re
 	validationWarnings := []string{}
 
 	for selector := range badSelectors {
-		g.skippedMethods[selector] = true
+		g.skippedMethods[selector] = "Go validation failed"
 		validationSkipped = append(validationSkipped, SkippedMethod{
 			Selector: selector,
 			Reason:   "Go validation failed",

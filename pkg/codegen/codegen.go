@@ -53,7 +53,7 @@ type generator struct {
 	skipped      []SkippedMethod
 	instanceVars    map[string]bool
 	jsonVars        map[string]bool   // vars with JSON default values (use json.RawMessage)
-	skippedMethods  map[string]bool   // methods that will fall back to bash (for @ self detection)
+	skippedMethods  map[string]string // methods that will fall back to bash (selector -> reason)
 
 	// Bytecode compilation for blocks
 	compiledBlocks   map[string]*bytecode.Chunk // Block ID -> compiled bytecode
@@ -331,60 +331,72 @@ func (g *generator) generateBlockCreation(block *parser.BlockExpr, m *compiledMe
 
 // preIdentifySkippedMethods runs through all methods to identify which will be skipped.
 // This is needed so that @ self calls can use sendMessage for skipped methods.
+// The map stores selector -> reason for skipping.
 func (g *generator) preIdentifySkippedMethods() {
 	// Check if this is a primitiveClass - all methods use built-in implementations
 	isPrimitiveClass := g.class.IsPrimitiveClass()
 
 	for _, m := range g.class.Methods {
-		willSkip := false
+		var reason string
 
 		// bashOnly pragma
 		if m.HasPragma("bashOnly") {
-			willSkip = true
+			reason = "bashOnly pragma"
 		}
 
 		// For primitiveClass, skip only if no native impl exists
 		if isPrimitiveClass {
 			if !hasPrimitiveImpl(g.class.Name, m.Selector) {
-				willSkip = true
+				if reason == "" {
+					reason = "primitiveClass method without native implementation"
+				}
 			}
-			if willSkip {
-				g.skippedMethods[m.Selector] = true
+			if reason != "" {
+				g.skippedMethods[m.Selector] = reason
 			}
 			continue
 		}
 
 		// Raw methods (unless primitive or has procyon pragma)
 		if m.Raw && !m.Primitive && !m.HasPragma("procyonOnly") && !m.HasPragma("procyonNative") {
-			willSkip = true
+			if reason == "" {
+				reason = "raw method"
+			}
 		}
 
 		// Primitive methods without native impl
 		if m.Primitive && !hasPrimitiveImpl(g.class.Name, m.Selector) {
-			willSkip = true
+			if reason == "" {
+				reason = "primitive method without native implementation"
+			}
 		}
 
 		// Check for bash-specific function calls
-		for _, tok := range m.Body.Tokens {
-			if tok.Type == "IDENTIFIER" {
-				switch tok.Value {
-				case "_ivar", "_ivar_set", "_throw", "_on_error", "_ensure", "_pop_handler":
-					willSkip = true
+		if reason == "" {
+			for _, tok := range m.Body.Tokens {
+				if tok.Type == "IDENTIFIER" {
+					switch tok.Value {
+					case "_ivar", "_ivar_set", "_throw", "_on_error", "_ensure", "_pop_handler":
+						reason = "uses bash-specific functions"
+						break
+					}
+				}
+				if reason != "" {
 					break
 				}
 			}
 		}
 
 		// Try to parse - if unsupported, will skip
-		if !willSkip && !m.Raw && !m.Primitive {
+		if reason == "" && !m.Raw && !m.Primitive {
 			result := parser.ParseMethod(m.Body.Tokens)
 			if result.Unsupported {
-				willSkip = true
+				reason = "unsupported construct"
 			}
 		}
 
-		if willSkip {
-			g.skippedMethods[m.Selector] = true
+		if reason != "" {
+			g.skippedMethods[m.Selector] = reason
 		}
 	}
 }
@@ -396,17 +408,12 @@ func (g *generator) compileMethods() []*compiledMethod {
 	isPrimitiveClass := g.class.IsPrimitiveClass()
 
 	for _, m := range g.class.Methods {
-		// Skip methods marked for skipping (e.g., from validation failure)
-		// Don't add to g.skipped here - the caller already added them
-		if g.skippedMethods[m.Selector] {
-			continue
-		}
-
-		// Skip bashOnly methods - they should only run in Bash
-		if m.HasPragma("bashOnly") {
+		// Skip methods marked for skipping in preIdentifySkippedMethods
+		// Add to g.skipped with the reason that was tracked
+		if reason, skipped := g.skippedMethods[m.Selector]; skipped {
 			g.skipped = append(g.skipped, SkippedMethod{
 				Selector: m.Selector,
-				Reason:   "bashOnly pragma",
+				Reason:   reason,
 			})
 			continue
 		}
@@ -1400,7 +1407,7 @@ func (g *generator) generateExpr(expr parser.Expr, m *compiledMethod) *jen.State
 		if e.IsSelf {
 			// Check if target method is raw or skipped (will fall back to bash)
 			// If so, use sendMessage to call bash runtime instead of direct Go call
-			isTargetSkipped := g.skippedMethods[e.Selector]
+			isTargetSkipped := g.skippedMethods[e.Selector] != ""
 			if !isTargetSkipped {
 				// Also check if explicitly marked as raw
 				for _, method := range g.class.Methods {
