@@ -860,6 +860,13 @@ func tokensToRawBash(tokens []ast.Token) string {
 				result.WriteString(" ")
 			}
 
+		case "SEMI":
+			result.WriteString(tok.Value)
+			// Don't add space if next token is also SEMI (for case statement ;;)
+			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" && tokens[i+1].Type != "SEMI" {
+				result.WriteString(" ")
+			}
+
 		default:
 			result.WriteString(tok.Value)
 			if i+1 < len(tokens) && tokens[i+1].Type != "NEWLINE" && tokens[i+1].Type != "RPAREN" {
