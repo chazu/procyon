@@ -174,6 +174,7 @@ const (
 	TokenMinus      = "MINUS"
 	TokenStar       = "STAR"
 	TokenSlash      = "SLASH"
+	TokenString       = "STRING"       // Generic string (from lexer)
 	TokenDString      = "DSTRING"
 	TokenSString      = "SSTRING"
 	TokenTripleString = "TRIPLESTRING"

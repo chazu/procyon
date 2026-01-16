@@ -1079,7 +1079,7 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		}
 		return &StringLit{Value: val}, nil
 
-	case "STRING":
+	case ast.TokenString:
 		// STRING tokens from other sources may still have quotes
 		p.advance()
 		val := tok.Value
@@ -1294,7 +1294,7 @@ func (p *Parser) parseMessageArg() (Expr, error) {
 		}
 		return &StringLit{Value: val}, nil
 
-	case "STRING":
+	case ast.TokenString:
 		// STRING tokens from other sources may still have quotes
 		p.advance()
 		val := tok.Value
