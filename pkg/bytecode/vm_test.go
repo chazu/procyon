@@ -2186,6 +2186,88 @@ func TestVMInvokeBlockNotFound(t *testing.T) {
 	}
 }
 
+// TestVMNonLocalReturn tests that OpNonLocalRet returns a NonLocalReturnError
+func TestVMNonLocalReturn(t *testing.T) {
+	vm := NewVM()
+
+	// Create a block that does a non-local return
+	innerChunk := NewChunk()
+	idx := innerChunk.AddConstant("escaped!")
+	innerChunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	innerChunk.Emit(OpNonLocalRet) // Non-local return
+
+	// Register the block and get its ID
+	blockID := vm.registerBlock(innerChunk, nil)
+
+	// Create main chunk that invokes the block
+	chunk := NewChunk()
+	blockIdx := chunk.AddConstant(blockID)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(blockIdx)...)
+	chunk.Emit(OpBlockValue)
+	// If we get here, the non-local return didn't work
+	failIdx := chunk.AddConstant("should not reach here")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(failIdx)...)
+	chunk.Emit(OpReturn)
+
+	result, err := vm.Execute(chunk, "", nil)
+
+	// Should get a NonLocalReturnError
+	if value, ok := IsNonLocalReturn(err); ok {
+		if value != "escaped!" {
+			t.Errorf("Expected 'escaped!', got %q", value)
+		}
+	} else {
+		t.Errorf("Expected NonLocalReturnError, got result=%q err=%v", result, err)
+	}
+}
+
+// TestVMNestedNonLocalReturn tests that non-local returns propagate through nested blocks
+func TestVMNestedNonLocalReturn(t *testing.T) {
+	vm := NewVM()
+
+	// Create inner block that does a non-local return
+	innerChunk := NewChunk()
+	idx := innerChunk.AddConstant("from inner")
+	innerChunk.EmitWithOperand(OpConst, uint16Bytes(idx)...)
+	innerChunk.Emit(OpNonLocalRet)
+
+	// Register inner block
+	innerBlockID := vm.registerBlock(innerChunk, nil)
+
+	// Create outer block that invokes inner block
+	outerChunk := NewChunk()
+	innerBlockIdx := outerChunk.AddConstant(innerBlockID)
+	outerChunk.EmitWithOperand(OpConst, uint16Bytes(innerBlockIdx)...)
+	outerChunk.Emit(OpBlockValue)
+	// If inner's non-local return worked, we shouldn't get here
+	failIdx := outerChunk.AddConstant("outer failed")
+	outerChunk.EmitWithOperand(OpConst, uint16Bytes(failIdx)...)
+	outerChunk.Emit(OpReturn)
+
+	// Register outer block
+	outerBlockID := vm.registerBlock(outerChunk, nil)
+
+	// Create main chunk that invokes outer block
+	chunk := NewChunk()
+	outerBlockIdx := chunk.AddConstant(outerBlockID)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(outerBlockIdx)...)
+	chunk.Emit(OpBlockValue)
+	mainFailIdx := chunk.AddConstant("main failed")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(mainFailIdx)...)
+	chunk.Emit(OpReturn)
+
+	result, err := vm.Execute(chunk, "", nil)
+
+	// Should get a NonLocalReturnError that propagated through both blocks
+	if value, ok := IsNonLocalReturn(err); ok {
+		if value != "from inner" {
+			t.Errorf("Expected 'from inner', got %q", value)
+		}
+	} else {
+		t.Errorf("Expected NonLocalReturnError, got result=%q err=%v", result, err)
+	}
+}
+
 // TestVMJSONObjectAtPutNested tests OBJECT_AT_PUT with nested objects
 func TestVMJSONObjectAtPutNested(t *testing.T) {
 	chunk := NewChunk()

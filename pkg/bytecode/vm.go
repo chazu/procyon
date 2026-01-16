@@ -100,6 +100,25 @@ func (c *CaptureCell) Release() {
 	}
 }
 
+// NonLocalReturnError signals a non-local return from a block.
+// This error propagates up through nested block invocations until
+// it reaches the enclosing method context that should handle it.
+type NonLocalReturnError struct {
+	Value string // The value to return
+}
+
+func (e *NonLocalReturnError) Error() string {
+	return "non-local return"
+}
+
+// IsNonLocalReturn checks if an error is a non-local return.
+func IsNonLocalReturn(err error) (string, bool) {
+	if nlr, ok := err.(*NonLocalReturnError); ok {
+		return nlr.Value, true
+	}
+	return "", false
+}
+
 // VM executes bytecode chunks.
 type VM struct {
 	// Current execution state
@@ -682,9 +701,10 @@ func (vm *VM) run() (string, error) {
 			return "", nil
 
 		case OpNonLocalRet:
-			// Non-local return exits the enclosing method
-			// For now, treat as regular return
-			return vm.pop(), nil
+			// Non-local return exits the enclosing method, not just the block.
+			// This is signaled by returning a NonLocalReturnError which propagates
+			// up through nested block invocations to the enclosing method.
+			return "", &NonLocalReturnError{Value: vm.pop()}
 
 		default:
 			return "", fmt.Errorf("unknown opcode: 0x%02x at offset %d", op, vm.ip-1)
