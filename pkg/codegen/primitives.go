@@ -815,11 +815,17 @@ func (g *generator) generatePrimitiveMethodCoproc(f *jen.File, m *compiledMethod
 func (g *generator) generatePrimitiveMethodArray(f *jen.File, m *compiledMethod) bool {
 	switch m.selector {
 	case "withValues_":
-		// Initialize array with space-separated values
+		// Class method: Create a new Array with space-separated values
 		f.Func().Id(m.goName).Params(
-			jen.Id("receiver").String(),
 			jen.Id("values").String(),
 		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Generate instance ID"),
+			jen.Id("id").Op(":=").Lit("array_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
 			jen.Comment("Split values by whitespace and build JSON array"),
 			jen.Id("parts").Op(":=").Qual("strings", "Fields").Call(jen.Id("values")),
 			jen.Id("jsonArray").Op(":=").Make(jen.Index().Interface(), jen.Len(jen.Id("parts"))),
@@ -830,9 +836,24 @@ func (g *generator) generatePrimitiveMethodArray(f *jen.File, m *compiledMethod)
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
 			),
-			jen.Comment("TODO: Set ivar 'items' on receiver to string(data)"),
-			jen.Id("_").Op("=").Id("data"),
-			jen.Return(jen.Id("receiver"), jen.Nil()),
+			jen.Line(),
+			jen.Comment("Save to database"),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("Array").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("Array"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Items"):     jen.Qual("encoding/json", "RawMessage").Call(jen.Id("data")),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
 		)
 		f.Line()
 		return true
@@ -914,11 +935,18 @@ func (g *generator) generatePrimitiveMethodDictionary(f *jen.File, m *compiledMe
 		return true
 
 	case "withPairs_":
-		// Build dictionary from "key:value key2:value2" pairs
+		// Class method: Create a new Dictionary from "key:value key2:value2" pairs
 		f.Func().Id(m.goName).Params(
-			jen.Id("receiver").String(),
 			jen.Id("pairs").String(),
 		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Generate instance ID"),
+			jen.Id("id").Op(":=").Lit("dict_").Op("+").Qual("strings", "ReplaceAll").Call(
+				jen.Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+				jen.Lit("-"),
+				jen.Lit(""),
+			),
+			jen.Line(),
+			jen.Comment("Build dictionary from pairs"),
 			jen.Id("data").Op(":=").Make(jen.Map(jen.String()).String()),
 			jen.For(jen.List(jen.Id("_"), jen.Id("pair")).Op(":=").Range().Qual("strings", "Fields").Call(jen.Id("pairs"))).Block(
 				jen.Id("parts").Op(":=").Qual("strings", "SplitN").Call(jen.Id("pair"), jen.Lit(":"), jen.Lit(2)),
@@ -930,44 +958,67 @@ func (g *generator) generatePrimitiveMethodDictionary(f *jen.File, m *compiledMe
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
 			),
-			jen.Comment("TODO: Set ivar 'items' on receiver to string(jsonBytes)"),
-			jen.Id("_").Op("=").Id("jsonBytes"),
-			jen.Return(jen.Id("receiver"), jen.Nil()),
+			jen.Line(),
+			jen.Comment("Save to database"),
+			jen.List(jen.Id("db"), jen.Err()).Op(":=").Id("openDB").Call(),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Id("instance").Op(":=").Op("&").Id("Dictionary").Values(jen.Dict{
+				jen.Id("Class"):     jen.Lit("Dictionary"),
+				jen.Id("CreatedAt"): jen.Qual("time", "Now").Call().Dot("Format").Call(jen.Qual("time", "RFC3339")),
+				jen.Id("Items"):     jen.Qual("encoding/json", "RawMessage").Call(jen.Id("jsonBytes")),
+			}),
+			jen.Line(),
+			jen.If(jen.Err().Op(":=").Id("saveInstance").Call(jen.Id("db"), jen.Id("id"), jen.Id("instance")), jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("id"), jen.Nil()),
 		)
 		f.Line()
 		return true
 
 	case "merge_":
-		// Merge another dictionary into this one
-		f.Func().Id(m.goName).Params(
-			jen.Id("receiver").String(),
-			jen.Id("items").String(),
+		// Instance method: Merge another dictionary into this one
+		f.Func().Parens(jen.Id("c").Op("*").Id("Dictionary")).Id(m.goName).Params(
 			jen.Id("otherJson").String(),
 		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Parse current items"),
 			jen.Var().Id("data").Map(jen.String()).Interface(),
-			jen.Var().Id("other").Map(jen.String()).Interface(),
-			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
-				jen.Index().Byte().Parens(jen.Id("items")),
-				jen.Op("&").Id("data"),
-			), jen.Err().Op("!=").Nil()).Block(
-				jen.Return(jen.Lit(""), jen.Err()),
+			jen.If(jen.Len(jen.Id("c").Dot("Items")).Op(">").Lit(0)).Block(
+				jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
+					jen.Id("c").Dot("Items"),
+					jen.Op("&").Id("data"),
+				), jen.Err().Op("!=").Nil()).Block(
+					jen.Return(jen.Lit(""), jen.Err()),
+				),
+			).Else().Block(
+				jen.Id("data").Op("=").Make(jen.Map(jen.String()).Interface()),
 			),
+			jen.Line(),
+			jen.Comment("Parse other dictionary"),
+			jen.Var().Id("other").Map(jen.String()).Interface(),
 			jen.If(jen.Err().Op(":=").Qual("encoding/json", "Unmarshal").Call(
 				jen.Index().Byte().Parens(jen.Id("otherJson")),
 				jen.Op("&").Id("other"),
 			), jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
 			),
+			jen.Line(),
+			jen.Comment("Merge"),
 			jen.For(jen.List(jen.Id("k"), jen.Id("v")).Op(":=").Range().Id("other")).Block(
 				jen.Id("data").Index(jen.Id("k")).Op("=").Id("v"),
 			),
+			jen.Line(),
+			jen.Comment("Marshal merged result back to Items"),
 			jen.List(jen.Id("merged"), jen.Err()).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("data")),
 			jen.If(jen.Err().Op("!=").Nil()).Block(
 				jen.Return(jen.Lit(""), jen.Err()),
 			),
-			jen.Comment("TODO: Set ivar 'items' on receiver to string(merged)"),
-			jen.Id("_").Op("=").Id("merged"),
-			jen.Return(jen.Id("receiver"), jen.Nil()),
+			jen.Id("c").Dot("Items").Op("=").Id("merged"),
+			jen.Return(jen.Lit(""), jen.Nil()),
 		)
 		f.Line()
 		return true

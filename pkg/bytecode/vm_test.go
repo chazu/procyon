@@ -2209,6 +2209,31 @@ func TestVMJSONObjectAtPutNested(t *testing.T) {
 	}
 }
 
+// TestVMJSONObjectAtPutReplace tests OBJECT_AT_PUT replacing an existing key
+func TestVMJSONObjectAtPutReplace(t *testing.T) {
+	chunk := NewChunk()
+	objIdx := chunk.AddConstant(`{"name":"old","count":1}`)
+	keyIdx := chunk.AddConstant("name")
+	valIdx := chunk.AddConstant("new")
+	chunk.EmitWithOperand(OpConst, uint16Bytes(objIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(keyIdx)...)
+	chunk.EmitWithOperand(OpConst, uint16Bytes(valIdx)...)
+	chunk.Emit(OpObjectAtPut)
+	chunk.Emit(OpReturn)
+
+	vm := NewVM()
+	result, err := vm.Execute(chunk, "", nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Result should have name replaced with "new"
+	expected := `{"name":"new","count":1}`
+	if result != expected {
+		t.Errorf("Expected %q, got %q", expected, result)
+	}
+}
+
 // TestVMSwapAndRot tests stack manipulation opcodes
 func TestVMSwapAndRot(t *testing.T) {
 	// Test SWAP

@@ -1049,10 +1049,89 @@ func jsonObjectAtPut(obj string, key string, value string) string {
 
 	// Check if key exists
 	searchKey := quotedKey + ":"
-	if strings.Contains(obj, searchKey) {
-		// Replace existing value (simplified)
-		// This is a basic implementation
-		return obj // TODO: proper replacement
+	idx := strings.Index(obj, searchKey)
+	if idx >= 0 {
+		// Key exists - replace its value
+		valueStart := idx + len(searchKey)
+		inner := obj[valueStart:]
+		inner = strings.TrimSpace(inner)
+
+		if len(inner) == 0 {
+			// Malformed JSON, just append
+			return obj[:len(obj)-1] + "," + quotedKey + ":" + quotedValue + "}"
+		}
+
+		// Calculate actual start position after trimming whitespace
+		whitespaceLen := len(obj[valueStart:]) - len(inner)
+		actualValueStart := valueStart + whitespaceLen
+
+		// Find the end of the existing value
+		var valueEnd int
+		if inner[0] == '"' {
+			// String value - find closing quote
+			escaped := false
+			for i := 1; i < len(inner); i++ {
+				if escaped {
+					escaped = false
+					continue
+				}
+				if inner[i] == '\\' {
+					escaped = true
+					continue
+				}
+				if inner[i] == '"' {
+					valueEnd = actualValueStart + i + 1
+					break
+				}
+			}
+		} else if inner[0] == '{' || inner[0] == '[' {
+			// Object or array - find matching closing bracket
+			depth := 0
+			closeChar := byte('}')
+			if inner[0] == '[' {
+				closeChar = ']'
+			}
+			inString := false
+			escaped := false
+			for i := 0; i < len(inner); i++ {
+				if escaped {
+					escaped = false
+					continue
+				}
+				if inner[i] == '\\' && inString {
+					escaped = true
+					continue
+				}
+				if inner[i] == '"' {
+					inString = !inString
+				}
+				if !inString {
+					if inner[i] == inner[0] {
+						depth++
+					} else if inner[i] == closeChar {
+						depth--
+						if depth == 0 {
+							valueEnd = actualValueStart + i + 1
+							break
+						}
+					}
+				}
+			}
+		} else {
+			// Number, bool, null - read until comma or closing brace
+			for i := 0; i < len(inner); i++ {
+				if inner[i] == ',' || inner[i] == '}' || inner[i] == ']' {
+					valueEnd = actualValueStart + i
+					break
+				}
+			}
+			if valueEnd == 0 {
+				valueEnd = len(obj)
+			}
+		}
+
+		// Replace the value
+		return obj[:actualValueStart] + quotedValue + obj[valueEnd:]
 	}
 
 	// Add new key-value pair

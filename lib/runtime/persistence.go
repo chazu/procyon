@@ -17,10 +17,11 @@ var ErrInstanceNotFound = errors.New("instance not found")
 
 // Persistence handles SQLite storage for instances
 type Persistence struct {
-	db     *sql.DB
-	dbPath string
-	os     *ObjectSpace
-	mu     sync.Mutex
+	db          *sql.DB
+	dbPath      string
+	os          *ObjectSpace
+	blockRunner *BlockRunner
+	mu          sync.Mutex
 }
 
 // NewPersistence creates a new persistence layer
@@ -76,6 +77,11 @@ func (p *Persistence) Close() error {
 		return p.db.Close()
 	}
 	return nil
+}
+
+// SetBlockRunner sets the block runner for resolving block references
+func (p *Persistence) SetBlockRunner(br *BlockRunner) {
+	p.blockRunner = br
 }
 
 // Save persists an instance to the database
@@ -160,7 +166,7 @@ func (p *Persistence) instanceFromJSON(id, jsonData string) (*Instance, error) {
 	// Load instance variables
 	for _, name := range varNames {
 		if val, ok := raw[name]; ok {
-			inst.Vars[name] = valueFromInterface(val)
+			inst.Vars[name] = valueFromInterfaceWithBlockRunner(val, p.blockRunner)
 		} else {
 			inst.Vars[name] = NilValue()
 		}
@@ -170,7 +176,14 @@ func (p *Persistence) instanceFromJSON(id, jsonData string) (*Instance, error) {
 }
 
 // valueFromInterface converts a JSON-parsed interface{} to a Value
+// This is a package-level function for use without a Persistence instance
 func valueFromInterface(v interface{}) Value {
+	return valueFromInterfaceWithBlockRunner(v, nil)
+}
+
+// valueFromInterfaceWithBlockRunner converts a JSON-parsed interface{} to a Value
+// with optional block resolution via BlockRunner
+func valueFromInterfaceWithBlockRunner(v interface{}, br *BlockRunner) Value {
 	if v == nil {
 		return NilValue()
 	}
@@ -188,14 +201,20 @@ func valueFromInterface(v interface{}) Value {
 	case []interface{}:
 		arr := NewArray()
 		for _, elem := range x {
-			arr.Push(valueFromInterface(elem))
+			arr.Push(valueFromInterfaceWithBlockRunner(elem, br))
 		}
 		return ArrayValue(arr)
 	case map[string]interface{}:
 		// Could be an object or instance reference
 		if blockID, ok := x["_block_id"].(string); ok {
-			// Block reference - create placeholder
-			return StringValue(blockID) // TODO: proper block handling
+			// Block reference - look up from BlockRunner if available
+			if br != nil {
+				if block := br.GetBlock(blockID); block != nil {
+					return BlockValue(block)
+				}
+			}
+			// Fall back to storing the block ID as a string for later resolution
+			return StringValue(blockID)
 		}
 		// Return as JSON string for now
 		data, _ := json.Marshal(x)

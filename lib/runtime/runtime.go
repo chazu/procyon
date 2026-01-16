@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/chazu/procyon/pkg/bytecode"
 )
 
 // Runtime is the main entry point for the shared runtime.
@@ -84,6 +86,8 @@ func New(cfg *Config) (*Runtime, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Connect persistence to block runner for block reference resolution
+		r.Persistence.SetBlockRunner(r.BlockRunner)
 	}
 
 	r.initialized = true
@@ -144,16 +148,12 @@ func (r *Runtime) GetInstance(id string) *Instance {
 
 // RegisterBlock registers a bytecode block
 func (r *Runtime) RegisterBlock(chunk interface{}, captures []*CaptureCell, instanceID, className string) string {
-	// Type assert to bytecode.Chunk
-	// We use interface{} to avoid circular imports in the header
-	bc, ok := chunk.(interface {
-		// Minimal chunk interface
-	})
+	// Type assert to *bytecode.Chunk
+	bc, ok := chunk.(*bytecode.Chunk)
 	if !ok {
 		return ""
 	}
-	_ = bc // TODO: proper bytecode chunk handling
-	return r.BlockRunner.RegisterBlock(nil, captures, instanceID, className)
+	return r.BlockRunner.RegisterBlock(bc, captures, instanceID, className)
 }
 
 // InvokeBlock invokes a block by ID
