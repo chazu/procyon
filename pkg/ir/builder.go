@@ -465,6 +465,20 @@ func (b *Builder) buildExpr(expr parser.Expr, scope *Scope) (Expression, Backend
 
 // buildIdentifier resolves an identifier to a variable reference.
 func (b *Builder) buildIdentifier(id *parser.Identifier, scope *Scope) (Expression, Backend, string) {
+	// Handle bash variable references like $client
+	if id.IsVariable {
+		// Strip the $ prefix since generateVarRef will add it back
+		name := id.Name
+		if len(name) > 0 && name[0] == '$' {
+			name = name[1:]
+		}
+		return &VarRefExpr{
+			Name:  name,
+			Kind:  VarGlobal, // Bash variable reference
+			Type_: TypeAny,
+		}, BackendBash, ""
+	}
+
 	// Handle special identifiers
 	if id.Name == "self" {
 		return &SelfExpr{}, BackendAny, ""

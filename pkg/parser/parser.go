@@ -59,7 +59,8 @@ func (BinaryExpr) exprNode() {}
 
 // Identifier represents a variable reference
 type Identifier struct {
-	Name string
+	Name       string
+	IsVariable bool // true if this is a bash variable like $client
 }
 
 func (Identifier) exprNode() {}
@@ -1102,8 +1103,9 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return expr, nil
 
 	case ast.TokenVariable:
-		// $variable - can't compile
-		return nil, fmt.Errorf("bash variable references ($var) not supported")
+		// $variable - bash variable reference (e.g., $client holds an instance ID)
+		p.advance()
+		return &Identifier{Name: tok.Value, IsVariable: true}, nil
 
 	case ast.TokenSubshell:
 		// Check if subshell contains a message send: $(@ receiver message)
@@ -1153,17 +1155,19 @@ func (p *Parser) parsePrimary() (Expr, error) {
 // parseMessageSend parses: receiver selector or receiver key1: arg1 key2: arg2
 // Called after @ has been consumed
 // Supports qualified names: @ Pkg::Class selector
+// Supports variable receivers: @ $client selector
 func (p *Parser) parseMessageSend() (Expr, error) {
-	// Parse receiver (must be an identifier for now)
-	if p.peek().Type != ast.TokenIdentifier {
+	// Parse receiver (identifier or variable like $client)
+	if p.peek().Type != ast.TokenIdentifier && p.peek().Type != ast.TokenVariable {
 		return nil, fmt.Errorf("expected receiver identifier after @, got %s", p.peek().Type)
 	}
 
 	receiverName := p.peek().Value
+	isVariable := p.peek().Type == ast.TokenVariable
 	p.advance() // consume receiver
 
 	isSelf := receiverName == "self"
-	var receiver Expr = &Identifier{Name: receiverName}
+	var receiver Expr = &Identifier{Name: receiverName, IsVariable: isVariable}
 
 	// Check for qualified name: Pkg::Class
 	if p.peek().Type == ast.TokenNamespaceSep {
