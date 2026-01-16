@@ -458,6 +458,12 @@ func (b *Builder) buildExpr(expr parser.Expr, scope *Scope) (Expression, Backend
 	case *parser.UnsupportedExpr:
 		return &SubshellExpr{Code: "# unsupported: " + e.Reason}, BackendBash, e.Reason
 
+	case *parser.OrExpr:
+		return b.buildOrExpr(e, scope)
+
+	case *parser.AndExpr:
+		return b.buildAndExpr(e, scope)
+
 	default:
 		return &LiteralExpr{Value: nil, Type_: TypeAny}, BackendAny, ""
 	}
@@ -585,6 +591,79 @@ func (b *Builder) buildComparisonExpr(e *parser.ComparisonExpr, scope *Scope) (E
 		Right: right,
 		Type_: TypeBool,
 	}, backend, reason
+}
+
+// buildOrExpr builds a short-circuit OR expression: expr or: [block]
+// The block is only evaluated if expr is false.
+func (b *Builder) buildOrExpr(e *parser.OrExpr, scope *Scope) (Expression, Backend, string) {
+	left, leftBackend, leftReason := b.buildExpr(e.Left, scope)
+
+	// Extract the expression from the block
+	// The block should contain a single expression that evaluates to a boolean
+	right, rightBackend, rightReason := b.extractBlockExpr(e.Right, scope)
+
+	backend := leftBackend
+	reason := leftReason
+	if rightBackend == BackendBash {
+		backend = BackendBash
+		if reason == "" {
+			reason = rightReason
+		}
+	}
+
+	return &BinaryExpr{
+		Left:  left,
+		Op:    "||",
+		Right: right,
+		Type_: TypeBool,
+	}, backend, reason
+}
+
+// buildAndExpr builds a short-circuit AND expression: expr and: [block]
+// The block is only evaluated if expr is true.
+func (b *Builder) buildAndExpr(e *parser.AndExpr, scope *Scope) (Expression, Backend, string) {
+	left, leftBackend, leftReason := b.buildExpr(e.Left, scope)
+
+	// Extract the expression from the block
+	right, rightBackend, rightReason := b.extractBlockExpr(e.Right, scope)
+
+	backend := leftBackend
+	reason := leftReason
+	if rightBackend == BackendBash {
+		backend = BackendBash
+		if reason == "" {
+			reason = rightReason
+		}
+	}
+
+	return &BinaryExpr{
+		Left:  left,
+		Op:    "&&",
+		Right: right,
+		Type_: TypeBool,
+	}, backend, reason
+}
+
+// extractBlockExpr extracts an expression from a block's statements.
+// For boolean blocks, this is typically the last (or only) expression.
+func (b *Builder) extractBlockExpr(stmts []parser.Statement, scope *Scope) (Expression, Backend, string) {
+	if len(stmts) == 0 {
+		return &LiteralExpr{Value: false, Type_: TypeBool}, BackendAny, ""
+	}
+
+	// Get the last statement and extract its expression
+	lastStmt := stmts[len(stmts)-1]
+
+	switch s := lastStmt.(type) {
+	case *parser.ExprStmt:
+		return b.buildExpr(s.Expr, scope)
+	case *parser.Return:
+		return b.buildExpr(s.Value, scope)
+	default:
+		// For other statement types, we can't easily extract an expression
+		// Return a placeholder - this shouldn't happen for well-formed or:/and: blocks
+		return &LiteralExpr{Value: false, Type_: TypeBool}, BackendBash, "cannot extract expression from block"
+	}
 }
 
 // buildMessageSend converts a parser message send to IR.

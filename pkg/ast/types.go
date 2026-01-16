@@ -202,6 +202,7 @@ const (
 	TokenEQ      = "EQ"      // ==
 	TokenNE      = "NE"      // !=
 	TokenEquals  = "EQUALS"  // = (single equals, for comparisons)
+	TokenStrNe   = "STR_NE"  // ~= (string not equal, Smalltalk style)
 	TokenPercent = "PERCENT" // % (modulo)
 	TokenDot     = "DOT"     // . (statement separator)
 	TokenComma   = "COMMA"   // , (string concatenation)
@@ -216,4 +217,7 @@ const (
 
 	// Namespaces
 	TokenNamespaceSep = "NAMESPACE_SEP" // :: for qualified names like Pkg::Class
+
+	// Comments
+	TokenComment = "COMMENT" // # comment text
 )

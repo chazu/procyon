@@ -223,6 +223,24 @@ type MessageSend struct {
 func (MessageSend) exprNode() {}
 func (MessageSend) stmtNode() {}
 
+// OrExpr represents: expr or: [block]
+// The block is evaluated lazily only if expr is false
+type OrExpr struct {
+	Left  Expr        // The left operand (evaluated first)
+	Right []Statement // The block to evaluate if Left is false
+}
+
+func (OrExpr) exprNode() {}
+
+// AndExpr represents: expr and: [block]
+// The block is evaluated lazily only if expr is true
+type AndExpr struct {
+	Left  Expr        // The left operand (evaluated first)
+	Right []Statement // The block to evaluate if Left is true
+}
+
+func (AndExpr) exprNode() {}
+
 // MethodBody represents a parsed method body
 type MethodBody struct {
 	LocalVars  []string
@@ -390,7 +408,35 @@ func (p *Parser) parseStatement() (Statement, error) {
 		return nil, err
 	}
 
+	// Handle chained boolean operators: expr or: [block] or: [block] and: [block]
+	// In Smalltalk, or: and and: are lazy boolean operators that take blocks
+	// Skip newlines before checking for boolean operators
+	p.skipNewlines()
+	for p.peek().Type == ast.TokenKeyword {
+		keyword := p.peek().Value
+		if keyword == "or:" {
+			p.advance() // consume "or:"
+			block, err := p.parseBlock()
+			if err != nil {
+				return nil, err
+			}
+			expr = &OrExpr{Left: expr, Right: block}
+			p.skipNewlines() // Skip newlines after block for chained operators
+		} else if keyword == "and:" {
+			p.advance() // consume "and:"
+			block, err := p.parseBlock()
+			if err != nil {
+				return nil, err
+			}
+			expr = &AndExpr{Left: expr, Right: block}
+			p.skipNewlines() // Skip newlines after block for chained operators
+		} else {
+			break // Not a boolean operator, check for control flow
+		}
+	}
+
 	// Check for control flow keywords after the expression
+	// (newlines already skipped by the loop above or if loop didn't run)
 	if p.peek().Type == ast.TokenKeyword {
 		keyword := p.peek().Value
 		switch keyword {
@@ -720,6 +766,10 @@ func (p *Parser) parseComparison() (Expr, error) {
 			op = "=="
 		case ast.TokenNE:
 			op = "!="
+		case ast.TokenEquals:
+			op = "==" // Single = is equality in Smalltalk
+		case ast.TokenStrNe:
+			op = "!=" // ~= is string not equal in Smalltalk
 		default:
 			return left, nil
 		}
@@ -1090,17 +1140,47 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return &StringLit{Value: val}, nil
 
 	case ast.TokenLParen:
-		// Parenthesized expression: (expr)
+		// Parenthesized expression: (expr), comparison: (a = b), or message send: (a matches: b)
 		p.advance() // consume (
-		expr, err := p.parseExpr()
+		left, err := p.parseExpr()
 		if err != nil {
 			return nil, err
 		}
+
+		// Check for comparison operators inside parentheses
+		if p.isComparisonOp(p.peek().Type) {
+			op := p.peek()
+			p.advance() // consume operator
+			right, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if p.peek().Type != ast.TokenRParen {
+				return nil, fmt.Errorf("expected ) after comparison expression, got %s", p.peek().Type)
+			}
+			p.advance() // consume )
+			return &ComparisonExpr{
+				Left:  left,
+				Op:    p.comparisonOpString(op),
+				Right: right,
+			}, nil
+		}
+
+		// Check for keyword message send inside parentheses: (receiver keyword: arg)
+		// This handles patterns like (actual matches: pattern)
+		if p.peek().Type == ast.TokenKeyword {
+			keyword := p.peek().Value
+			// Only handle non-control-flow keywords as message sends
+			if !p.isControlFlowKeyword(keyword) {
+				return p.parseParenthesizedMessageSend(left)
+			}
+		}
+
 		if p.peek().Type != ast.TokenRParen {
 			return nil, fmt.Errorf("expected ) after parenthesized expression, got %s", p.peek().Type)
 		}
 		p.advance() // consume )
-		return expr, nil
+		return left, nil
 
 	case ast.TokenVariable:
 		// $variable - bash variable reference (e.g., $client holds an instance ID)
@@ -1358,7 +1438,96 @@ func (p *Parser) atEnd() bool {
 }
 
 func (p *Parser) skipNewlines() {
-	for !p.atEnd() && (p.peek().Type == ast.TokenNewline || p.peek().Type == ast.TokenDot) {
+	for !p.atEnd() && (p.peek().Type == ast.TokenNewline || p.peek().Type == ast.TokenDot || p.peek().Type == ast.TokenComment) {
 		p.advance()
 	}
+}
+
+// isComparisonOp returns true if the token type is a comparison operator
+func (p *Parser) isComparisonOp(tokenType string) bool {
+	switch tokenType {
+	case ast.TokenEquals, ast.TokenEQ, ast.TokenNE, ast.TokenStrNe,
+		ast.TokenGT, ast.TokenLT, ast.TokenGE, ast.TokenLE:
+		return true
+	}
+	return false
+}
+
+// comparisonOpString converts a comparison token to its string representation
+func (p *Parser) comparisonOpString(tok ast.Token) string {
+	switch tok.Type {
+	case ast.TokenEquals:
+		return "=="
+	case ast.TokenEQ:
+		return "=="
+	case ast.TokenNE:
+		return "!="
+	case ast.TokenStrNe:
+		return "!="
+	case ast.TokenGT:
+		return ">"
+	case ast.TokenLT:
+		return "<"
+	case ast.TokenGE:
+		return ">="
+	case ast.TokenLE:
+		return "<="
+	default:
+		return tok.Value
+	}
+}
+
+// isControlFlowKeyword returns true if the keyword is a control flow keyword
+func (p *Parser) isControlFlowKeyword(keyword string) bool {
+	switch keyword {
+	case "ifTrue:", "ifFalse:", "whileTrue:", "whileFalse:",
+		"ifNil:", "ifNotNil:", "do:", "collect:", "select:",
+		"or:", "and:":
+		return true
+	}
+	return false
+}
+
+// parseParenthesizedMessageSend parses: (receiver keyword: arg) or (receiver key1: arg1 key2: arg2)
+// Called when we've already parsed the receiver inside parens and see a non-control-flow keyword
+func (p *Parser) parseParenthesizedMessageSend(receiver Expr) (Expr, error) {
+	// Parse keyword message: keyword: arg [keyword: arg ...]
+	var selector string
+	var args []Expr
+
+	for p.peek().Type == ast.TokenKeyword {
+		keyword := p.peek().Value
+		// Stop if we hit a control flow keyword
+		if p.isControlFlowKeyword(keyword) {
+			break
+		}
+
+		selector += strings.TrimSuffix(keyword, ":") + "_"
+		p.advance() // consume keyword
+
+		// Parse argument
+		arg, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+	}
+
+	if p.peek().Type != ast.TokenRParen {
+		return nil, fmt.Errorf("expected ) after parenthesized message send, got %s", p.peek().Type)
+	}
+	p.advance() // consume )
+
+	// Determine receiver - could be self, identifier, or other expression
+	isSelf := false
+	if id, ok := receiver.(*Identifier); ok && id.Name == "self" {
+		isSelf = true
+	}
+
+	return &MessageSend{
+		Receiver: receiver,
+		Selector: selector,
+		Args:     args,
+		IsSelf:   isSelf,
+	}, nil
 }
