@@ -246,6 +246,39 @@ var primitiveRegistry = map[string]map[string]bool{
 		"tomorrow":  true,
 		"yesterday": true,
 	},
+	"Runtime": {
+		// Instance lifecycle
+		"generateId_":   true,
+		"create_id_":    true,
+		"delete_":       true,
+		// Instance data access
+		"dataFor_":      true,
+		"setData_for_":  true,
+		// Introspection
+		"classFor_":     true,
+	},
+	"Store": {
+		// Persistence operations
+		"put_data_":       true,
+		"getInstance_":    true,
+		"deleteInstance_": true,
+		"exists_":         true,
+		"findByClass_":    true,
+	},
+	"Http": {
+		// Core HTTP methods
+		"get_":       true,
+		"post_to_":   true,
+		"put_to_":    true,
+		"delete_":    true,
+		"head_":      true,
+		"status_":    true,
+		"ping_":      true,
+	},
+	"Tool": {
+		// Utility methods
+		"commandExists_": true,
+	},
 }
 
 // hasPrimitiveImpl checks if a native implementation exists for a primitive method.
@@ -342,6 +375,14 @@ func (g *generator) generatePrimitiveMethod(f *jen.File, m *compiledMethod) bool
 		return g.generatePrimitiveMethodProtocol(f, m)
 	case "Time":
 		return g.generatePrimitiveMethodTime(f, m)
+	case "Runtime":
+		return g.generatePrimitiveMethodRuntime(f, m)
+	case "Store":
+		return g.generatePrimitiveMethodStore(f, m)
+	case "Http":
+		return g.generatePrimitiveMethodHttp(f, m)
+	case "Tool":
+		return g.generatePrimitiveMethodTool(f, m)
 	default:
 		return false
 	}
@@ -1714,6 +1755,454 @@ func (g *generator) generatePrimitiveMethodTime(f *jen.File, m *compiledMethod) 
 				jen.Qual("strconv", "FormatInt").Call(jen.Id("yesterday").Dot("Unix").Call(), jen.Lit(10)),
 				jen.Nil(),
 			),
+		)
+		f.Line()
+		return true
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodRuntime generates native Runtime class methods.
+func (g *generator) generatePrimitiveMethodRuntime(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "generateId_":
+		// Generate a unique instance ID: classname_uuid
+		f.Func().Id(m.goName).Params(jen.Id("className").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("lower").Op(":=").Qual("strings", "ToLower").Call(jen.Id("className")),
+			jen.Id("uuid").Op(":=").Qual("github.com/google/uuid", "New").Call().Dot("String").Call(),
+			jen.Comment("Use first 8 chars of UUID for readability"),
+			jen.If(jen.Len(jen.Id("uuid")).Op(">").Lit(8)).Block(
+				jen.Id("uuid").Op("=").Id("uuid").Index(jen.Empty(), jen.Lit(8)),
+			),
+			jen.Return(jen.Id("lower").Op("+").Lit("_").Op("+").Id("uuid"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "create_id_":
+		// Create a new instance with given ID in the store
+		f.Func().Id(m.goName).Params(
+			jen.Id("className").String(),
+			jen.Id("instanceId").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Initialize with empty JSON object containing class"),
+			jen.Id("initialData").Op(":=").Qual("fmt", "Sprintf").Call(
+				jen.Lit(`{"class":"%s"}`),
+				jen.Id("className"),
+			),
+			jen.List(jen.Id("_"), jen.Err()).Op(":=").Id("TT_SendMessage").Call(
+				jen.Lit("Store"),
+				jen.Lit("put_data_"),
+				jen.Id("instanceId"),
+				jen.Id("initialData"),
+			),
+			jen.Return(jen.Id("instanceId"), jen.Err()),
+		)
+		f.Line()
+		return true
+
+	case "delete_":
+		// Delete an instance
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("TT_SendMessage").Call(
+				jen.Lit("Store"),
+				jen.Lit("deleteInstance_"),
+				jen.Id("instanceId"),
+			)),
+		)
+		f.Line()
+		return true
+
+	case "dataFor_":
+		// Get instance data as JSON
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("TT_SendMessage").Call(
+				jen.Lit("Store"),
+				jen.Lit("getInstance_"),
+				jen.Id("instanceId"),
+			)),
+		)
+		f.Line()
+		return true
+
+	case "setData_for_":
+		// Set instance data from JSON
+		f.Func().Id(m.goName).Params(
+			jen.Id("json").String(),
+			jen.Id("instanceId").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("TT_SendMessage").Call(
+				jen.Lit("Store"),
+				jen.Lit("put_data_"),
+				jen.Id("instanceId"),
+				jen.Id("json"),
+			)),
+		)
+		f.Line()
+		return true
+
+	case "classFor_":
+		// Get class name from instance ID (extract from ID prefix)
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Comment("Instance IDs are formatted as classname_uuid"),
+			jen.Id("parts").Op(":=").Qual("strings", "Split").Call(jen.Id("instanceId"), jen.Lit("_")),
+			jen.If(jen.Len(jen.Id("parts")).Op("==").Lit(0)).Block(
+				jen.Return(jen.Lit(""), jen.Qual("fmt", "Errorf").Call(jen.Lit("invalid instance ID: %s"), jen.Id("instanceId"))),
+			),
+			jen.Comment("Convert lowercase prefix back to class name (first char uppercase)"),
+			jen.Id("className").Op(":=").Qual("strings", "Title").Call(jen.Id("parts").Index(jen.Lit(0))),
+			jen.Return(jen.Id("className"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodStore generates native Store class methods.
+func (g *generator) generatePrimitiveMethodStore(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "put_data_":
+		// Store instance data in SQLite
+		stmts := append(dbPathStatements(),
+			jen.Id("db").Op(",").Err().Op(":=").Qual("database/sql", "Open").Call(
+				jen.Lit("sqlite3"),
+				jen.Id("dbPath"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Comment("Upsert the instance data"),
+			jen.List(jen.Id("_"), jen.Err()).Op("=").Id("db").Dot("Exec").Call(
+				jen.Lit("INSERT INTO instances (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = ?"),
+				jen.Id("instanceId"),
+				jen.Id("data"),
+				jen.Id("data"),
+			),
+			jen.Return(jen.Lit(""), jen.Err()),
+		)
+		f.Func().Id(m.goName).Params(
+			jen.Id("instanceId").String(),
+			jen.Id("data").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(stmts...)
+		f.Line()
+		return true
+
+	case "getInstance_":
+		// Get instance data from SQLite
+		stmts := append(dbPathStatements(),
+			jen.Id("db").Op(",").Err().Op(":=").Qual("database/sql", "Open").Call(
+				jen.Lit("sqlite3"),
+				jen.Id("dbPath"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Var().Id("data").String(),
+			jen.Err().Op("=").Id("db").Dot("QueryRow").Call(
+				jen.Lit("SELECT data FROM instances WHERE id = ?"),
+				jen.Id("instanceId"),
+			).Dot("Scan").Call(jen.Op("&").Id("data")),
+			jen.If(jen.Err().Op("==").Qual("database/sql", "ErrNoRows")).Block(
+				jen.Return(jen.Lit("{}"), jen.Nil()),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.Id("data"), jen.Nil()),
+		)
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(stmts...)
+		f.Line()
+		return true
+
+	case "deleteInstance_":
+		// Delete instance from SQLite
+		stmts := append(dbPathStatements(),
+			jen.Id("db").Op(",").Err().Op(":=").Qual("database/sql", "Open").Call(
+				jen.Lit("sqlite3"),
+				jen.Id("dbPath"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.List(jen.Id("_"), jen.Err()).Op("=").Id("db").Dot("Exec").Call(
+				jen.Lit("DELETE FROM instances WHERE id = ?"),
+				jen.Id("instanceId"),
+			),
+			jen.Return(jen.Lit(""), jen.Err()),
+		)
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(stmts...)
+		f.Line()
+		return true
+
+	case "exists_":
+		// Check if instance exists in SQLite
+		stmts := append(dbPathStatements(),
+			jen.Id("db").Op(",").Err().Op(":=").Qual("database/sql", "Open").Call(
+				jen.Lit("sqlite3"),
+				jen.Id("dbPath"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Var().Id("count").Int(),
+			jen.Err().Op("=").Id("db").Dot("QueryRow").Call(
+				jen.Lit("SELECT COUNT(*) FROM instances WHERE id = ?"),
+				jen.Id("instanceId"),
+			).Dot("Scan").Call(jen.Op("&").Id("count")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Err()),
+			),
+			jen.If(jen.Id("count").Op(">").Lit(0)).Block(
+				jen.Return(jen.Lit("true"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("false"), jen.Nil()),
+		)
+		f.Func().Id(m.goName).Params(jen.Id("instanceId").String()).Parens(jen.List(jen.String(), jen.Error())).Block(stmts...)
+		f.Line()
+		return true
+
+	case "findByClass_":
+		// Find all instances of a class
+		stmts := append(dbPathStatements(),
+			jen.Id("db").Op(",").Err().Op(":=").Qual("database/sql", "Open").Call(
+				jen.Lit("sqlite3"),
+				jen.Id("dbPath"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("[]"), jen.Err()),
+			),
+			jen.Defer().Id("db").Dot("Close").Call(),
+			jen.Line(),
+			jen.Comment("Query instances where the JSON data contains the class"),
+			jen.Id("rows").Op(",").Err().Op(":=").Id("db").Dot("Query").Call(
+				jen.Lit("SELECT id FROM instances WHERE json_extract(data, '$.class') = ?"),
+				jen.Id("className"),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("[]"), jen.Err()),
+			),
+			jen.Defer().Id("rows").Dot("Close").Call(),
+			jen.Line(),
+			jen.Var().Id("ids").Index().String(),
+			jen.For(jen.Id("rows").Dot("Next").Call()).Block(
+				jen.Var().Id("id").String(),
+				jen.If(jen.Err().Op(":=").Id("rows").Dot("Scan").Call(jen.Op("&").Id("id")), jen.Err().Op("==").Nil()).Block(
+					jen.Id("ids").Op("=").Append(jen.Id("ids"), jen.Id("id")),
+				),
+			),
+			jen.Line(),
+			jen.Comment("Return as JSON array"),
+			jen.Id("result").Op(",").Err().Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("ids")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("[]"), jen.Err()),
+			),
+			jen.Return(jen.String().Call(jen.Id("result")), jen.Nil()),
+		)
+		f.Func().Id(m.goName).Params(jen.Id("className").String()).Parens(jen.List(jen.String(), jen.Error())).Block(stmts...)
+		f.Line()
+		return true
+
+	default:
+		return false
+	}
+}
+
+// dbPathStatements returns jen statements to get the database path.
+// This sets a variable called "dbPath" with the appropriate path.
+// Uses SQLITE_JSON_DB env var for consistency with bash runtime.
+func dbPathStatements() []jen.Code {
+	return []jen.Code{
+		jen.Id("dbPath").Op(":=").Qual("os", "Getenv").Call(jen.Lit("SQLITE_JSON_DB")),
+		jen.If(jen.Id("dbPath").Op("==").Lit("")).Block(
+			jen.List(jen.Id("home"), jen.Id("_")).Op(":=").Qual("os", "UserHomeDir").Call(),
+			jen.Id("dbPath").Op("=").Qual("path/filepath", "Join").Call(
+				jen.Id("home"),
+				jen.Lit(".trashtalk"),
+				jen.Lit("instances.db"),
+			),
+		),
+	}
+}
+
+// generatePrimitiveMethodHttp generates native Http class methods.
+func (g *generator) generatePrimitiveMethodHttp(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "get_":
+		// Simple GET request
+		f.Func().Id(m.goName).Params(jen.Id("url").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("resp").Op(",").Err().Op(":=").Qual("net/http", "Get").Call(jen.Id("url")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("resp").Dot("Body").Dot("Close").Call(),
+			jen.Id("body").Op(",").Err().Op(":=").Qual("io", "ReadAll").Call(jen.Id("resp").Dot("Body")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.String().Call(jen.Id("body")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "post_to_":
+		// POST request with JSON body
+		f.Func().Id(m.goName).Params(
+			jen.Id("data").String(),
+			jen.Id("url").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("resp").Op(",").Err().Op(":=").Qual("net/http", "Post").Call(
+				jen.Id("url"),
+				jen.Lit("application/json"),
+				jen.Qual("strings", "NewReader").Call(jen.Id("data")),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("resp").Dot("Body").Dot("Close").Call(),
+			jen.Id("body").Op(",").Err().Op(":=").Qual("io", "ReadAll").Call(jen.Id("resp").Dot("Body")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.String().Call(jen.Id("body")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "put_to_":
+		// PUT request with JSON body
+		f.Func().Id(m.goName).Params(
+			jen.Id("data").String(),
+			jen.Id("url").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("req").Op(",").Err().Op(":=").Qual("net/http", "NewRequest").Call(
+				jen.Lit("PUT"),
+				jen.Id("url"),
+				jen.Qual("strings", "NewReader").Call(jen.Id("data")),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("req").Dot("Header").Dot("Set").Call(jen.Lit("Content-Type"), jen.Lit("application/json")),
+			jen.Id("resp").Op(",").Err().Op(":=").Qual("net/http", "DefaultClient").Dot("Do").Call(jen.Id("req")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("resp").Dot("Body").Dot("Close").Call(),
+			jen.Id("body").Op(",").Err().Op(":=").Qual("io", "ReadAll").Call(jen.Id("resp").Dot("Body")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.String().Call(jen.Id("body")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "delete_":
+		// DELETE request
+		f.Func().Id(m.goName).Params(jen.Id("url").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("req").Op(",").Err().Op(":=").Qual("net/http", "NewRequest").Call(
+				jen.Lit("DELETE"),
+				jen.Id("url"),
+				jen.Nil(),
+			),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Id("resp").Op(",").Err().Op(":=").Qual("net/http", "DefaultClient").Dot("Do").Call(jen.Id("req")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("resp").Dot("Body").Dot("Close").Call(),
+			jen.Id("body").Op(",").Err().Op(":=").Qual("io", "ReadAll").Call(jen.Id("resp").Dot("Body")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.String().Call(jen.Id("body")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "head_":
+		// HEAD request (returns headers)
+		f.Func().Id(m.goName).Params(jen.Id("url").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("resp").Op(",").Err().Op(":=").Qual("net/http", "Head").Call(jen.Id("url")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("resp").Dot("Body").Dot("Close").Call(),
+			jen.Comment("Build header string"),
+			jen.Var().Id("headers").Qual("strings", "Builder"),
+			jen.For(jen.List(jen.Id("key"), jen.Id("values")).Op(":=").Range().Id("resp").Dot("Header")).Block(
+				jen.For(jen.List(jen.Id("_"), jen.Id("v")).Op(":=").Range().Id("values")).Block(
+					jen.Id("headers").Dot("WriteString").Call(jen.Id("key").Op("+").Lit(": ").Op("+").Id("v").Op("+").Lit("\n")),
+				),
+			),
+			jen.Return(jen.Id("headers").Dot("String").Call(), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "status_":
+		// Get HTTP status code only
+		f.Func().Id(m.goName).Params(jen.Id("url").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("resp").Op(",").Err().Op(":=").Qual("net/http", "Get").Call(jen.Id("url")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Defer().Id("resp").Dot("Body").Dot("Close").Call(),
+			jen.Return(jen.Qual("strconv", "Itoa").Call(jen.Id("resp").Dot("StatusCode")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	case "ping_":
+		// Check if URL is reachable (returns true/false)
+		f.Func().Id(m.goName).Params(jen.Id("url").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("client").Op(":=").Op("&").Qual("net/http", "Client").Values(jen.Dict{
+				jen.Id("Timeout"): jen.Lit(5).Op("*").Qual("time", "Second"),
+			}),
+			jen.Id("resp").Op(",").Err().Op(":=").Id("client").Dot("Get").Call(jen.Id("url")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.Defer().Id("resp").Dot("Body").Dot("Close").Call(),
+			jen.If(jen.Id("resp").Dot("StatusCode").Op(">=").Lit(200).Op("&&").Id("resp").Dot("StatusCode").Op("<").Lit(400)).Block(
+				jen.Return(jen.Lit("true"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("false"), jen.Nil()),
+		)
+		f.Line()
+		return true
+
+	default:
+		return false
+	}
+}
+
+// generatePrimitiveMethodTool generates native Tool class methods.
+func (g *generator) generatePrimitiveMethodTool(f *jen.File, m *compiledMethod) bool {
+	switch m.selector {
+	case "commandExists_":
+		// Check if command exists on PATH
+		f.Func().Id(m.goName).Params(jen.Id("commandName").String()).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.List(jen.Id("_"), jen.Err()).Op(":=").Qual("os/exec", "LookPath").Call(jen.Id("commandName")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit("false"), jen.Nil()),
+			),
+			jen.Return(jen.Lit("true"), jen.Nil()),
 		)
 		f.Line()
 		return true
