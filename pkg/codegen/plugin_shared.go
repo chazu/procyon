@@ -123,17 +123,29 @@ func GenerateSharedPluginWithOptions(class *ast.Class, opts GenerateOptions) *Re
 }
 
 func (g *generator) generateSharedPlugin() *Result {
+	// First pass: identify which methods will be skipped
+	g.preIdentifySkippedMethods()
+
+	// Compile methods first so we know what wrappers we'll generate
+	compiled := g.compileMethods()
+
+	// Split into class and instance methods
+	var instanceMethods, classMethods []*compiledMethod
+	for _, m := range compiled {
+		if m.isClass {
+			classMethods = append(classMethods, m)
+		} else {
+			instanceMethods = append(instanceMethods, m)
+		}
+	}
+
 	f := jen.NewFile("main")
 
-	// CGO preamble with libtrashtalk linking
+	// CGO preamble with libtrashtalk linking AND extern declarations for method wrappers
 	// Note: LDFLAGS uses simple -L path. Runtime library path should be set via
 	// DYLD_LIBRARY_PATH or by installing libtrashtalk.dylib to a standard location.
-	f.CgoPreamble(`
-#cgo CFLAGS: -I${SRCDIR}/../../include
-#cgo LDFLAGS: -L${SRCDIR}/../../lib -ltrashtalk
-#include <libtrashtalk.h>
-#include <stdlib.h>
-`)
+	preamble := g.buildCGOPreamble(instanceMethods, classMethods)
+	f.CgoPreamble(preamble)
 
 	// Import "C" for c-shared exports
 	f.ImportAlias("C", "")
@@ -143,10 +155,6 @@ func (g *generator) generateSharedPlugin() *Result {
 
 	// ErrUnknownSelector
 	f.Var().Id("ErrUnknownSelector").Op("=").Qual("errors", "New").Call(jen.Lit("unknown selector"))
-	f.Line()
-
-	// Generate init() for class registration
-	g.generateSharedInit(f)
 	f.Line()
 
 	// Struct definition (same as binary mode)
@@ -170,22 +178,6 @@ func (g *generator) generateSharedPlugin() *Result {
 		g.generateGrpcHelpersShared(f)
 	}
 
-	// First pass: identify which methods will be skipped
-	g.preIdentifySkippedMethods()
-
-	// Compile methods
-	compiled := g.compileMethods()
-
-	// Split into class and instance methods
-	var instanceMethods, classMethods []*compiledMethod
-	for _, m := range compiled {
-		if m.isClass {
-			classMethods = append(classMethods, m)
-		} else {
-			instanceMethods = append(instanceMethods, m)
-		}
-	}
-
 	// Generate method dispatch tables (internal, for runtime callbacks)
 	g.generateSharedDispatch(f, instanceMethods)
 	f.Line()
@@ -194,6 +186,14 @@ func (g *generator) generateSharedPlugin() *Result {
 
 	// Generate CGO-exported method wrappers
 	g.generateSharedMethodExports(f, instanceMethods, classMethods)
+	f.Line()
+
+	// Generate runtime-compatible method wrappers for method registration
+	g.generateRuntimeMethodWrappers(f, instanceMethods, classMethods)
+	f.Line()
+
+	// Generate init() with method table (after wrappers so we can reference them)
+	g.generateSharedInitWithMethods(f, instanceMethods, classMethods)
 	f.Line()
 
 	// Generate method implementations
@@ -222,10 +222,17 @@ func (g *generator) generateSharedPlugin() *Result {
 }
 
 // generateSharedInit generates the init() function that registers the class with the shared runtime
+// DEPRECATED: Use generateSharedInitWithMethods instead
 func (g *generator) generateSharedInit(f *jen.File) {
+	g.generateSharedInitWithMethods(f, nil, nil)
+}
+
+// generateSharedInitWithMethods generates init() with method table registration
+func (g *generator) generateSharedInitWithMethods(f *jen.File, instanceMethods, classMethods []*compiledMethod) {
 	className := g.class.Name
 	qualifiedName := g.class.QualifiedName()
 	superclass := g.class.Parent
+	cClassName := strings.ReplaceAll(className, "::", "__")
 
 	// Build instance variable names array
 	varNames := make([]string, 0, len(g.class.InstanceVars))
@@ -233,11 +240,8 @@ func (g *generator) generateSharedInit(f *jen.File) {
 		varNames = append(varNames, iv.Name)
 	}
 
-	f.Comment("// init registers this class with the shared runtime")
-	f.Func().Id("init").Params().Block(
-		// Call TT_RegisterClass with class metadata
-		// We'll build this as a series of statements
-
+	// Build init function body statements
+	initStmts := []jen.Code{
 		// Convert class name to C string
 		jen.Id("className").Op(":=").Qual("C", "CString").Call(jen.Lit(qualifiedName)),
 		jen.Defer().Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("className"))),
@@ -252,16 +256,111 @@ func (g *generator) generateSharedInit(f *jen.File) {
 
 		// Build instance vars array
 		g.generateInstanceVarsArray(varNames),
+	}
 
-		// Register the class with the runtime
-		jen.Qual("C", "TT_RegisterClass").Call(
-			jen.Id("className"),
-			jen.Id("superclass"),
-			jen.Id("instanceVars"),
-			jen.Qual("C", "int").Call(jen.Lit(len(varNames))),
-			jen.Nil(), // Method table (we use exported functions instead)
-		),
-	)
+	// Build method table if methods provided
+	if len(instanceMethods) > 0 || len(classMethods) > 0 {
+		// Allocate instance method entries in C memory
+		if len(instanceMethods) > 0 {
+			instMethodStmts := []jen.Code{
+				// Allocate C memory for method entries
+				jen.Id("instMethodsPtr").Op(":=").Parens(jen.Op("*").Qual("C", "TTMethodEntry")).Parens(
+					jen.Qual("C", "malloc").Call(
+						jen.Qual("C", "size_t").Call(
+							jen.Qual("unsafe", "Sizeof").Call(jen.Qual("C", "TTMethodEntry").Values()).Op("*").Lit(len(instanceMethods)),
+						),
+					),
+				),
+				// Create a Go slice view for easier population
+				jen.Id("instMethods").Op(":=").Qual("unsafe", "Slice").Call(
+					jen.Id("instMethodsPtr"),
+					jen.Lit(len(instanceMethods)),
+				),
+			}
+			for i, m := range instanceMethods {
+				wrapperName := fmt.Sprintf("__%s_method_%s", cClassName, m.goName)
+				instMethodStmts = append(instMethodStmts,
+					jen.Id("instMethods").Index(jen.Lit(i)).Op("=").Qual("C", "TTMethodEntry").Values(jen.Dict{
+						jen.Id("selector"): jen.Qual("C", "CString").Call(jen.Lit(m.selector)),
+						jen.Id("impl"):     jen.Parens(jen.Qual("C", "TTMethodFunc")).Parens(jen.Qual("C", wrapperName)),
+						jen.Id("numArgs"):  jen.Qual("C", "int").Call(jen.Lit(len(m.args))),
+						jen.Id("flags"):    jen.Qual("C", "TT_METHOD_NATIVE"),
+					}),
+				)
+			}
+			initStmts = append(initStmts, instMethodStmts...)
+		} else {
+			initStmts = append(initStmts, jen.Var().Id("instMethodsPtr").Op("*").Qual("C", "TTMethodEntry"))
+		}
+
+		// Allocate class method entries in C memory
+		if len(classMethods) > 0 {
+			classMethodStmts := []jen.Code{
+				// Allocate C memory for method entries
+				jen.Id("classMethodsPtr").Op(":=").Parens(jen.Op("*").Qual("C", "TTMethodEntry")).Parens(
+					jen.Qual("C", "malloc").Call(
+						jen.Qual("C", "size_t").Call(
+							jen.Qual("unsafe", "Sizeof").Call(jen.Qual("C", "TTMethodEntry").Values()).Op("*").Lit(len(classMethods)),
+						),
+					),
+				),
+				// Create a Go slice view for easier population
+				jen.Id("classMethods").Op(":=").Qual("unsafe", "Slice").Call(
+					jen.Id("classMethodsPtr"),
+					jen.Lit(len(classMethods)),
+				),
+			}
+			for i, m := range classMethods {
+				wrapperName := fmt.Sprintf("__%s_classmethod_%s", cClassName, m.goName)
+				classMethodStmts = append(classMethodStmts,
+					jen.Id("classMethods").Index(jen.Lit(i)).Op("=").Qual("C", "TTMethodEntry").Values(jen.Dict{
+						jen.Id("selector"): jen.Qual("C", "CString").Call(jen.Lit(m.selector)),
+						jen.Id("impl"):     jen.Parens(jen.Qual("C", "TTMethodFunc")).Parens(jen.Qual("C", wrapperName)),
+						jen.Id("numArgs"):  jen.Qual("C", "int").Call(jen.Lit(len(m.args))),
+						jen.Id("flags"):    jen.Qual("C", "TT_METHOD_NATIVE").Op("|").Qual("C", "TT_METHOD_CLASS_METHOD"),
+					}),
+				)
+			}
+			initStmts = append(initStmts, classMethodStmts...)
+		} else {
+			initStmts = append(initStmts, jen.Var().Id("classMethodsPtr").Op("*").Qual("C", "TTMethodEntry"))
+		}
+
+		// Build method table struct
+		initStmts = append(initStmts,
+			jen.Id("methods").Op(":=").Op("&").Qual("C", "TTMethodTable").Values(jen.Dict{
+				jen.Id("instanceMethods"):    jen.Id("instMethodsPtr"),
+				jen.Id("numInstanceMethods"): jen.Qual("C", "int").Call(jen.Lit(len(instanceMethods))),
+				jen.Id("classMethods"):       jen.Id("classMethodsPtr"),
+				jen.Id("numClassMethods"):    jen.Qual("C", "int").Call(jen.Lit(len(classMethods))),
+			}),
+		)
+
+		// Register with method table
+		initStmts = append(initStmts,
+			jen.Qual("C", "TT_RegisterClass").Call(
+				jen.Id("className"),
+				jen.Id("superclass"),
+				jen.Id("instanceVars"),
+				jen.Qual("C", "int").Call(jen.Lit(len(varNames))),
+				jen.Id("methods"),
+			),
+		)
+	} else {
+		// No methods - register with nil
+		initStmts = append(initStmts,
+			jen.Qual("C", "TT_RegisterClass").Call(
+				jen.Id("className"),
+				jen.Id("superclass"),
+				jen.Id("instanceVars"),
+				jen.Qual("C", "int").Call(jen.Lit(len(varNames))),
+				jen.Nil(),
+			),
+		)
+	}
+
+	f.Comment("// init registers this class with the shared runtime")
+	f.Func().Id("init").Params().Block(initStmts...)
 	f.Line()
 
 	// Also add a GetClassName export for backward compatibility
@@ -269,6 +368,47 @@ func (g *generator) generateSharedInit(f *jen.File) {
 	f.Func().Id("GetClassName").Params().Op("*").Qual("C", "char").Block(
 		jen.Return(jen.Qual("C", "CString").Call(jen.Lit(className))),
 	)
+}
+
+// methodTablePointer generates the pointer to a method entry array
+func (g *generator) methodTablePointer(varName string, length int) *jen.Statement {
+	if length == 0 {
+		return jen.Nil()
+	}
+	return jen.Op("&").Id(varName).Index(jen.Lit(0))
+}
+
+// buildCGOPreamble generates the CGO preamble with extern declarations for method wrappers
+func (g *generator) buildCGOPreamble(instanceMethods, classMethods []*compiledMethod) string {
+	className := g.class.Name
+	cClassName := strings.ReplaceAll(className, "::", "__")
+
+	var sb strings.Builder
+
+	// Standard includes and flags
+	sb.WriteString(`
+#cgo CFLAGS: -I${SRCDIR}/../../include
+#cgo LDFLAGS: -L${SRCDIR}/../../lib -ltrashtalk
+#include <libtrashtalk.h>
+#include <stdlib.h>
+`)
+
+	// Add extern declarations for method wrappers if we have any
+	if len(instanceMethods) > 0 || len(classMethods) > 0 {
+		sb.WriteString("\n// Extern declarations for method wrappers (defined via //export)\n")
+
+		for _, m := range instanceMethods {
+			wrapperName := fmt.Sprintf("__%s_method_%s", cClassName, m.goName)
+			sb.WriteString(fmt.Sprintf("extern TTValue %s(TTInstance* self, TTValue* args, int numArgs);\n", wrapperName))
+		}
+
+		for _, m := range classMethods {
+			wrapperName := fmt.Sprintf("__%s_classmethod_%s", cClassName, m.goName)
+			sb.WriteString(fmt.Sprintf("extern TTValue %s(TTInstance* self, TTValue* args, int numArgs);\n", wrapperName))
+		}
+	}
+
+	return sb.String()
 }
 
 // generateInstanceVarsArray generates code to create a C array of instance var names
@@ -730,6 +870,120 @@ func (g *generator) generateSharedMethodExports(f *jen.File, instanceMethods, cl
 			jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"instance":%q,"result":%q,"exit_code":0}`), jen.String().Parens(jen.Id("updatedJSON")), jen.Id("result")),
 		),
 	)
+}
+
+// generateRuntimeMethodWrappers generates C-compatible wrapper functions for each method
+// These wrappers have the TTMethodFunc signature so they can be registered with the runtime
+func (g *generator) generateRuntimeMethodWrappers(f *jen.File, instanceMethods, classMethods []*compiledMethod) {
+	className := g.class.Name
+	cClassName := strings.ReplaceAll(className, "::", "__")
+
+	f.Line()
+	f.Comment("// Runtime method wrappers - C-compatible functions for method registration")
+	f.Line()
+
+	// Generate wrappers for instance methods
+	for _, m := range instanceMethods {
+		wrapperName := fmt.Sprintf("__%s_method_%s", cClassName, m.goName)
+		selector := m.selector
+
+		f.Comment(fmt.Sprintf("//export %s", wrapperName))
+		f.Func().Id(wrapperName).Params(
+			jen.Id("self").Op("*").Qual("C", "TTInstance"),
+			jen.Id("args").Op("*").Qual("C", "TTValue"),
+			jen.Id("numArgs").Qual("C", "int"),
+		).Qual("C", "TTValue").Block(
+			// Serialize instance to JSON
+			jen.Id("cJSON").Op(":=").Qual("C", "TT_Serialize").Call(jen.Id("self")),
+			jen.Id("instanceJSON").Op(":=").Qual("C", "GoString").Call(jen.Id("cJSON")),
+			jen.Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cJSON"))),
+			jen.Line(),
+			// Convert args to string slice
+			jen.Id("goArgs").Op(":=").Make(jen.Index().String(), jen.Int().Parens(jen.Id("numArgs"))),
+			jen.If(jen.Id("args").Op("!=").Nil().Op("&&").Id("numArgs").Op(">").Lit(0)).Block(
+				jen.Id("cArgs").Op(":=").Qual("unsafe", "Slice").Call(jen.Id("args"), jen.Int().Parens(jen.Id("numArgs"))),
+				jen.For(jen.List(jen.Id("i"), jen.Id("cArg")).Op(":=").Range().Id("cArgs")).Block(
+					jen.Id("cStr").Op(":=").Qual("C", "TT_ValueAsString").Call(jen.Id("cArg")),
+					jen.If(jen.Id("cStr").Op("!=").Nil()).Block(
+						jen.Id("goArgs").Index(jen.Id("i")).Op("=").Qual("C", "GoString").Call(jen.Id("cStr")),
+						jen.Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cStr"))),
+					),
+				),
+			),
+			jen.Line(),
+			// Call dispatch with the selector
+			jen.Id("argsJSON").Op(",").Id("_").Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("goArgs")),
+			jen.Id("resultJSON").Op(":=").Id("dispatchInternal").Call(jen.Id("instanceJSON"), jen.Lit(selector), jen.String().Parens(jen.Id("argsJSON"))),
+			jen.Line(),
+			// Parse result and update instance in runtime
+			jen.Var().Id("result").Struct(
+				jen.Id("Instance").String().Tag(map[string]string{"json": "instance"}),
+				jen.Id("Result").String().Tag(map[string]string{"json": "result"}),
+				jen.Id("ExitCode").Int().Tag(map[string]string{"json": "exit_code"}),
+			),
+			jen.Qual("encoding/json", "Unmarshal").Call(jen.Index().Byte().Parens(jen.Id("resultJSON")), jen.Op("&").Id("result")),
+			jen.Line(),
+			// Update instance state if modified
+			jen.If(jen.Id("result").Dot("Instance").Op("!=").Lit("").Op("&&").Id("self").Op("!=").Nil()).Block(
+				jen.Id("cNewJSON").Op(":=").Qual("C", "CString").Call(jen.Id("result").Dot("Instance")),
+				jen.Qual("C", "TT_Deserialize").Call(jen.Id("cNewJSON")),
+				jen.Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cNewJSON"))),
+			),
+			jen.Line(),
+			// Return result
+			jen.If(jen.Id("result").Dot("ExitCode").Op("!=").Lit(0)).Block(
+				jen.Return(jen.Qual("C", "TT_MakeNil").Call()),
+			),
+			jen.Id("cResult").Op(":=").Qual("C", "CString").Call(jen.Id("result").Dot("Result")),
+			jen.Return(jen.Qual("C", "TT_MakeString").Call(jen.Id("cResult"))),
+		)
+		f.Line()
+	}
+
+	// Generate wrappers for class methods
+	for _, m := range classMethods {
+		wrapperName := fmt.Sprintf("__%s_classmethod_%s", cClassName, m.goName)
+		selector := m.selector
+
+		f.Comment(fmt.Sprintf("//export %s", wrapperName))
+		f.Func().Id(wrapperName).Params(
+			jen.Id("self").Op("*").Qual("C", "TTInstance"),
+			jen.Id("args").Op("*").Qual("C", "TTValue"),
+			jen.Id("numArgs").Qual("C", "int"),
+		).Qual("C", "TTValue").Block(
+			// Convert args to string slice
+			jen.Id("goArgs").Op(":=").Make(jen.Index().String(), jen.Int().Parens(jen.Id("numArgs"))),
+			jen.If(jen.Id("args").Op("!=").Nil().Op("&&").Id("numArgs").Op(">").Lit(0)).Block(
+				jen.Id("cArgs").Op(":=").Qual("unsafe", "Slice").Call(jen.Id("args"), jen.Int().Parens(jen.Id("numArgs"))),
+				jen.For(jen.List(jen.Id("i"), jen.Id("cArg")).Op(":=").Range().Id("cArgs")).Block(
+					jen.Id("cStr").Op(":=").Qual("C", "TT_ValueAsString").Call(jen.Id("cArg")),
+					jen.If(jen.Id("cStr").Op("!=").Nil()).Block(
+						jen.Id("goArgs").Index(jen.Id("i")).Op("=").Qual("C", "GoString").Call(jen.Id("cStr")),
+						jen.Qual("C", "free").Call(jen.Qual("unsafe", "Pointer").Call(jen.Id("cStr"))),
+					),
+				),
+			),
+			jen.Line(),
+			// Call dispatch with the selector (empty instance for class method)
+			jen.Id("argsJSON").Op(",").Id("_").Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("goArgs")),
+			jen.Id("resultJSON").Op(":=").Id("dispatchInternal").Call(jen.Lit(""), jen.Lit(selector), jen.String().Parens(jen.Id("argsJSON"))),
+			jen.Line(),
+			// Parse result
+			jen.Var().Id("result").Struct(
+				jen.Id("Result").String().Tag(map[string]string{"json": "result"}),
+				jen.Id("ExitCode").Int().Tag(map[string]string{"json": "exit_code"}),
+			),
+			jen.Qual("encoding/json", "Unmarshal").Call(jen.Index().Byte().Parens(jen.Id("resultJSON")), jen.Op("&").Id("result")),
+			jen.Line(),
+			// Return result
+			jen.If(jen.Id("result").Dot("ExitCode").Op("!=").Lit(0)).Block(
+				jen.Return(jen.Qual("C", "TT_MakeNil").Call()),
+			),
+			jen.Id("cResult").Op(":=").Qual("C", "CString").Call(jen.Id("result").Dot("Result")),
+			jen.Return(jen.Qual("C", "TT_MakeString").Call(jen.Id("cResult"))),
+		)
+		f.Line()
+	}
 }
 
 // generateGrpcHelpersShared generates gRPC helpers optimized for shared runtime

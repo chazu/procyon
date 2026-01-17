@@ -63,6 +63,11 @@ typedef struct {
     int numClassMethods;
 } TTMethodTable;
 
+// Helper to call a method function pointer (cgo can't call function pointers directly)
+static TTValue call_method_func(TTMethodFunc fn, TTInstance* self, TTValue* args, int numArgs) {
+    return fn(self, args, numArgs);
+}
+
 */
 import "C"
 import (
@@ -182,7 +187,69 @@ func TT_RegisterClass(className, superclass *C.char, instanceVars **C.char, numV
 	// Create method table
 	mt := runtime.NewMethodTable()
 
+	// Parse C method table if provided
+	if methods != nil {
+		// Parse instance methods
+		if methods.instanceMethods != nil && methods.numInstanceMethods > 0 {
+			entries := unsafe.Slice(methods.instanceMethods, int(methods.numInstanceMethods))
+			for _, entry := range entries {
+				selector := C.GoString(entry.selector)
+				funcPtr := entry.impl
+				numArgs := int(entry.numArgs)
+				flags := runtime.MethodFlags(entry.flags)
+
+				// Create a wrapper that calls the C function
+				wrapper := createCMethodWrapper(funcPtr)
+				mt.AddInstanceMethod(selector, wrapper, numArgs, flags)
+			}
+		}
+
+		// Parse class methods
+		if methods.classMethods != nil && methods.numClassMethods > 0 {
+			entries := unsafe.Slice(methods.classMethods, int(methods.numClassMethods))
+			for _, entry := range entries {
+				selector := C.GoString(entry.selector)
+				funcPtr := entry.impl
+				numArgs := int(entry.numArgs)
+				flags := runtime.MethodFlags(entry.flags)
+
+				wrapper := createCMethodWrapper(funcPtr)
+				mt.AddClassMethod(selector, wrapper, numArgs, flags)
+			}
+		}
+	}
+
 	r.RegisterClass(name, super, vars, mt)
+}
+
+// createCMethodWrapper creates a Go MethodFunc that calls a C method function pointer
+func createCMethodWrapper(funcPtr C.TTMethodFunc) runtime.MethodFunc {
+	// Capture the function pointer in the closure
+	fn := funcPtr
+	return func(self *runtime.Instance, args []runtime.Value) runtime.Value {
+		// Convert self to C.TTInstance pointer
+		var cSelf *C.TTInstance
+		if self != nil {
+			cSelf = (*C.TTInstance)(unsafe.Pointer(self))
+		}
+
+		// Convert args to C.TTValue array
+		cArgs := make([]C.TTValue, len(args))
+		for i, arg := range args {
+			cArgs[i] = valueToC(arg)
+		}
+
+		var argsPtr *C.TTValue
+		if len(cArgs) > 0 {
+			argsPtr = &cArgs[0]
+		}
+
+		// Call the C function via helper
+		result := C.call_method_func(fn, cSelf, argsPtr, C.int(len(args)))
+
+		// Convert result back to Go
+		return valueFromC(result)
+	}
 }
 
 // ============================================================================
