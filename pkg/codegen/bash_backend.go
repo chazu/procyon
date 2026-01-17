@@ -459,6 +459,23 @@ func (b *BashBackend) generateCondition(expr ir.Expression) (string, error) {
 		}
 		// For other JSON primitives, use -n test
 		return fmt.Sprintf("[[ -n \"%s\" ]]", exprStr), nil
+	case *ir.MessageSendExpr:
+		// Check for predicate selectors that should compile to bash tests
+		if testOp, isPredicate := bashPredicateTest(e.Selector); isPredicate {
+			// Generate the receiver as the subject of the test
+			subject, err := b.generateExpr(e.Receiver)
+			if err != nil {
+				return "", err
+			}
+			subjectVar := stripDollar(subject)
+			return fmt.Sprintf("[[ %s \"$%s\" ]]", testOp, subjectVar), nil
+		}
+		// Non-predicate message send - generate and wrap in -n test
+		exprStr, err := b.generateExpr(expr)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("[[ -n \"%s\" ]]", exprStr), nil
 	default:
 		// For other expressions, wrap in test
 		exprStr, err := b.generateExpr(expr)
@@ -954,6 +971,31 @@ func stripDollar(s string) string {
 		return s[1:]
 	}
 	return s
+}
+
+// bashPredicateTest maps predicate selectors to bash test operators.
+// Returns (testOp, true) if the selector is a predicate, ("", false) otherwise.
+// Predicate selectors are unary messages that should compile to [[ testOp "$var" ]]
+// instead of method calls.
+func bashPredicateTest(selector string) (string, bool) {
+	predicates := map[string]string{
+		// String/variable tests
+		"isEmpty":  "-z",
+		"notEmpty": "-n",
+		// File tests
+		"fileExists":   "-e",
+		"isFile":       "-f",
+		"isDirectory":  "-d",
+		"isFifo":       "-p",
+		"isSymlink":    "-L",
+		"isReadable":   "-r",
+		"isWritable":   "-w",
+		"isExecutable": "-x",
+	}
+	if op, ok := predicates[selector]; ok {
+		return op, true
+	}
+	return "", false
 }
 
 // isArithmeticExpr returns true if the expression is an arithmetic operation

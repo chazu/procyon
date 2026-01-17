@@ -2392,6 +2392,90 @@ func TestBashBackend_ClassPrimitive_FileIsNewer(t *testing.T) {
 	}
 }
 
+// TestBashBackend_PredicateCondition tests that predicate selectors like notEmpty
+// compile to bash test expressions instead of method calls when used in conditions.
+func TestBashBackend_PredicateCondition(t *testing.T) {
+	prog := &ir.Program{
+		Name:   "PredicateTest",
+		Parent: "Object",
+		Methods: []ir.Method{
+			{
+				Selector: "testNotEmpty:",
+				Kind:     ir.InstanceMethod,
+				Args:     []ir.VarDecl{{Name: "str"}},
+				Body: []ir.Statement{
+					&ir.IfStmt{
+						Condition: &ir.MessageSendExpr{
+							Receiver: &ir.VarRefExpr{Name: "str", Kind: ir.VarParam},
+							Selector: "notEmpty",
+						},
+						ThenBlock: []ir.Statement{
+							&ir.ReturnStmt{
+								Value: &ir.LiteralExpr{Value: "yes", Type_: ir.TypeString},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	backend := codegen.NewBashBackend()
+	result, err := backend.Generate(prog)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	// Should generate [[ -n "$str" ]] for the condition, NOT a method call
+	if !strings.Contains(result, `[[ -n "$str" ]]`) {
+		t.Errorf("Expected '[[ -n \"$str\" ]]' in output for notEmpty predicate, got:\n%s", result)
+	}
+
+	// Should NOT generate a method call like @ "$str" notEmpty
+	if strings.Contains(result, `@ "$str" notEmpty`) {
+		t.Errorf("Should not generate method call for notEmpty predicate, got:\n%s", result)
+	}
+}
+
+// TestBashBackend_PredicateCondition_IVar tests predicates work with instance variables
+func TestBashBackend_PredicateCondition_IVar(t *testing.T) {
+	prog := &ir.Program{
+		Name:         "PredicateIVarTest",
+		Parent:       "Object",
+		InstanceVars: []ir.VarDecl{{Name: "handler"}},
+		Methods: []ir.Method{
+			{
+				Selector: "testHandler",
+				Kind:     ir.InstanceMethod,
+				Body: []ir.Statement{
+					&ir.IfStmt{
+						Condition: &ir.MessageSendExpr{
+							Receiver: &ir.VarRefExpr{Name: "handler", Kind: ir.VarIVar},
+							Selector: "notEmpty",
+						},
+						ThenBlock: []ir.Statement{
+							&ir.ReturnStmt{
+								Value: &ir.LiteralExpr{Value: "yes", Type_: ir.TypeString},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	backend := codegen.NewBashBackend()
+	result, err := backend.Generate(prog)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	// Should generate [[ -n "$(_ivar handler)" ]] for instance variable
+	if !strings.Contains(result, `[[ -n "$(_ivar handler)" ]]`) {
+		t.Errorf("Expected '[[ -n \"$(_ivar handler)\" ]]' in output for ivar predicate, got:\n%s", result)
+	}
+}
+
 // =============================================================================
 // HELPER FUNCTIONS FOR TESTS
 // =============================================================================
