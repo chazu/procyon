@@ -207,6 +207,22 @@ func (g *generator) generatePrimitiveMethodString(f *jen.File, m *compiledMethod
 		f.Line()
 		return true
 
+	case "splitToArray_on_":
+		// Split string on delimiter and return as JSON array
+		f.Func().Id(m.goName).Params(
+			jen.Id("str").String(),
+			jen.Id("delim").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Id("parts").Op(":=").Qual("strings", "Split").Call(jen.Id("str"), jen.Id("delim")),
+			jen.List(jen.Id("jsonBytes"), jen.Err()).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("parts")),
+			jen.If(jen.Err().Op("!=").Nil()).Block(
+				jen.Return(jen.Lit(""), jen.Err()),
+			),
+			jen.Return(jen.String().Parens(jen.Id("jsonBytes")), jen.Nil()),
+		)
+		f.Line()
+		return true
+
 	case "before_in_":
 		f.Func().Id(m.goName).Params(
 			jen.Id("delim").String(),

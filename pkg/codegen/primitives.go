@@ -129,9 +129,10 @@ var primitiveRegistry = map[string]map[string]bool{
 		"uppercase_":            true,
 		"lowercase_":            true,
 		// String splitting
-		"split_on_":  true,
-		"before_in_": true,
-		"after_in_":  true,
+		"split_on_":        true,
+		"splitToArray_on_": true,
+		"before_in_":       true,
+		"after_in_":        true,
 		// String building
 		"concat_with_":       true,
 		"concat_with_with_":  true,
@@ -203,6 +204,11 @@ var primitiveRegistry = map[string]map[string]bool{
 		// class, id, delete are handled by built-in dispatch cases
 		"new":         true,
 		"printString": true,
+		// Dynamic dispatch (perform:) - falls back to bash, requires runtime
+		"perform_":                 true,
+		"perform_with_":            true,
+		"perform_with_with_":       true,
+		"perform_with_with_with_":  true,
 	},
 	"Protocol": {
 		// Protocol methods require runtime introspection - bash only for now
@@ -1159,6 +1165,11 @@ func (g *generator) generatePrimitiveMethodObject(f *jen.File, m *compiledMethod
 
 	case "inspectTo_":
 		// Inspect to specific depth
+		return false
+
+	case "perform_", "perform_with_", "perform_with_with_", "perform_with_with_with_":
+		// Dynamic method dispatch requires runtime message sending
+		// Fall back to bash implementation
 		return false
 
 	default:

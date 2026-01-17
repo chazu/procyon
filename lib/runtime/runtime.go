@@ -90,6 +90,9 @@ func New(cfg *Config) (*Runtime, error) {
 		r.Persistence.SetBlockRunner(r.BlockRunner)
 	}
 
+	// Register base Object class
+	RegisterObjectClass(r)
+
 	r.initialized = true
 	return r, nil
 }
