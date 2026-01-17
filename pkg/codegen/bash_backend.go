@@ -209,6 +209,12 @@ func (b *BashBackend) generateMethod(m *ir.Method) error {
 		}
 	}
 
+	// If method body is empty (e.g., procyonOnly methods), emit a no-op
+	// to prevent bash syntax error from empty function body
+	if len(m.Body) == 0 && len(m.Args) == 0 && len(m.Locals) == 0 {
+		b.writeln(":  # procyonOnly - no bash implementation")
+	}
+
 	b.indent--
 	b.writeln("}")
 	b.writeln("")
@@ -594,12 +600,17 @@ func (b *BashBackend) generateMessageSend(e *ir.MessageSendExpr) (string, error)
 	// Build selector (replace : with _)
 	selector := selectorToBashName(e.Selector)
 
-	// Build args
+	// Build args - all arguments must be quoted to prevent word splitting
 	var args []string
 	for _, arg := range e.Args {
 		argStr, err := b.generateExpr(arg)
 		if err != nil {
 			return "", err
+		}
+		// Quote variables and expressions to prevent word splitting
+		// Skip quoting if already quoted or is a literal without special chars
+		if needsQuoting(argStr) {
+			argStr = fmt.Sprintf("\"%s\"", argStr)
 		}
 		args = append(args, argStr)
 	}
@@ -996,4 +1007,57 @@ func (b *BashBackend) generateArithExpr(expr ir.Expression) (string, error) {
 		// Fall back to regular expression generation
 		return b.generateExpr(expr)
 	}
+}
+
+// needsQuoting returns true if the argument string needs to be quoted
+// to prevent word splitting in bash
+func needsQuoting(s string) bool {
+	// Already quoted
+	if strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"") {
+		return false
+	}
+	// Variable references and subshells need quoting to prevent word splitting
+	// Even $(...) subshells can return empty strings or strings with spaces
+	if strings.HasPrefix(s, "$") {
+		return true
+	}
+	// Simple numeric literals don't need quoting
+	if isNumericLiteral(s) {
+		return false
+	}
+	// Check for characters that need quoting
+	for _, c := range s {
+		if c == ' ' || c == '\t' || c == '\n' || c == '*' || c == '?' {
+			return true
+		}
+	}
+	// Simple word-like strings (alphanumeric, underscore, hyphen) don't need quoting
+	isSimple := true
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+			isSimple = false
+			break
+		}
+	}
+	return !isSimple
+}
+
+// isNumericLiteral returns true if the string is a simple numeric literal
+func isNumericLiteral(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	start := 0
+	if s[0] == '-' || s[0] == '+' {
+		start = 1
+	}
+	if start >= len(s) {
+		return false
+	}
+	for i := start; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

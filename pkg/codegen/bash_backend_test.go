@@ -1972,9 +1972,13 @@ func TestBashBackend_EdgeCase_MethodNoParamsNoLocals(t *testing.T) {
 		t.Fatalf("Generate failed: %v", err)
 	}
 
-	// Method should still be generated, just empty
-	if !strings.Contains(result, "__Test__noop() {\n}") {
-		t.Error("Missing empty method")
+	// Method should be generated with a no-op to prevent bash syntax error
+	// Empty function bodies are invalid in bash, so we emit ":"
+	if !strings.Contains(result, "__Test__noop() {") {
+		t.Error("Missing noop method declaration")
+	}
+	if !strings.Contains(result, ":  # procyonOnly") {
+		t.Error("Missing no-op statement in empty method")
 	}
 }
 
