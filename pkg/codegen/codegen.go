@@ -926,14 +926,91 @@ func (g *generator) generateIfStatement(s *parser.IfExpr, m *compiledMethod) []j
 // For message sends, we convert to bool with: result != ""
 func (g *generator) generateCondition(expr parser.Expr, m *compiledMethod) *jen.Statement {
 	// Check if the expression is a comparison (already returns bool)
-	switch expr.(type) {
+	switch e := expr.(type) {
 	case *parser.ComparisonExpr:
 		return g.generateExpr(expr, m)
+	case *parser.MessageSend:
+		// Check for predicate selectors that should compile to native Go tests
+		if goTest, isPredicate := goPredicateTest(e.Selector); isPredicate {
+			subject := g.generateExpr(e.Receiver, m)
+			return goTest(subject)
+		}
 	}
 
 	// For message sends and other expressions, wrap in truthiness check
 	// In Trashtalk, non-empty string = truthy
 	return g.generateExpr(expr, m).Op("!=").Lit("")
+}
+
+// goPredicateTest maps predicate selectors to Go code generators.
+// Returns (generator func, true) if the selector is a predicate, (nil, false) otherwise.
+// This ensures identical semantics between bash and native backends.
+func goPredicateTest(selector string) (func(*jen.Statement) *jen.Statement, bool) {
+	predicates := map[string]func(*jen.Statement) *jen.Statement{
+		// String/variable tests - use len() for efficiency
+		"isEmpty": func(subject *jen.Statement) *jen.Statement {
+			return jen.Len(subject).Op("==").Lit(0)
+		},
+		"notEmpty": func(subject *jen.Statement) *jen.Statement {
+			return jen.Len(subject).Op(">").Lit(0)
+		},
+		// File tests - use os.Stat and check error/mode
+		"fileExists": func(subject *jen.Statement) *jen.Statement {
+			// _, err := os.Stat(subject); err == nil
+			return jen.Func().Params().Bool().Block(
+				jen.List(jen.Id("_"), jen.Err()).Op(":=").Qual("os", "Stat").Call(subject),
+				jen.Return(jen.Err().Op("==").Nil()),
+			).Call()
+		},
+		"isFile": func(subject *jen.Statement) *jen.Statement {
+			return jen.Func().Params().Bool().Block(
+				jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(subject),
+				jen.Return(jen.Err().Op("==").Nil().Op("&&").Id("info").Dot("Mode").Call().Dot("IsRegular").Call()),
+			).Call()
+		},
+		"isDirectory": func(subject *jen.Statement) *jen.Statement {
+			return jen.Func().Params().Bool().Block(
+				jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(subject),
+				jen.Return(jen.Err().Op("==").Nil().Op("&&").Id("info").Dot("IsDir").Call()),
+			).Call()
+		},
+		"isSymlink": func(subject *jen.Statement) *jen.Statement {
+			return jen.Func().Params().Bool().Block(
+				jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Lstat").Call(subject),
+				jen.Return(jen.Err().Op("==").Nil().Op("&&").Id("info").Dot("Mode").Call().Op("&").Qual("os", "ModeSymlink").Op("!=").Lit(0)),
+			).Call()
+		},
+		"isReadable": func(subject *jen.Statement) *jen.Statement {
+			return jen.Func().Params().Bool().Block(
+				jen.List(jen.Id("f"), jen.Err()).Op(":=").Qual("os", "Open").Call(subject),
+				jen.If(jen.Err().Op("!=").Nil()).Block(jen.Return(jen.False())),
+				jen.Id("f").Dot("Close").Call(),
+				jen.Return(jen.True()),
+			).Call()
+		},
+		"isWritable": func(subject *jen.Statement) *jen.Statement {
+			return jen.Func().Params().Bool().Block(
+				jen.List(jen.Id("f"), jen.Err()).Op(":=").Qual("os", "OpenFile").Call(
+					subject,
+					jen.Qual("os", "O_WRONLY"),
+					jen.Lit(0),
+				),
+				jen.If(jen.Err().Op("!=").Nil()).Block(jen.Return(jen.False())),
+				jen.Id("f").Dot("Close").Call(),
+				jen.Return(jen.True()),
+			).Call()
+		},
+		"isExecutable": func(subject *jen.Statement) *jen.Statement {
+			return jen.Func().Params().Bool().Block(
+				jen.List(jen.Id("info"), jen.Err()).Op(":=").Qual("os", "Stat").Call(subject),
+				jen.Return(jen.Err().Op("==").Nil().Op("&&").Id("info").Dot("Mode").Call().Op("&").Lit(0111).Op("!=").Lit(0)),
+			).Call()
+		},
+	}
+	if gen, ok := predicates[selector]; ok {
+		return gen, true
+	}
+	return nil, false
 }
 
 // generateWhileStatement generates Go for loop from Trashtalk whileTrue:

@@ -258,3 +258,48 @@ func TestGenerateOptions_Struct(t *testing.T) {
 		t.Error("Default SkipValidation should be false")
 	}
 }
+
+func TestGoPredicateTest(t *testing.T) {
+	// Test that all expected predicates are recognized
+	expectedPredicates := []string{
+		"isEmpty",
+		"notEmpty",
+		"fileExists",
+		"isFile",
+		"isDirectory",
+		"isSymlink",
+		"isReadable",
+		"isWritable",
+		"isExecutable",
+	}
+
+	for _, pred := range expectedPredicates {
+		t.Run(pred, func(t *testing.T) {
+			gen, ok := goPredicateTest(pred)
+			if !ok {
+				t.Errorf("goPredicateTest(%q) should return true, got false", pred)
+			}
+			if gen == nil {
+				t.Errorf("goPredicateTest(%q) returned nil generator", pred)
+			}
+		})
+	}
+
+	// Test that non-predicates return false
+	nonPredicates := []string{
+		"getValue",
+		"setValue:",
+		"send",
+		"at:put:",
+		"increment",
+	}
+
+	for _, np := range nonPredicates {
+		t.Run("not_"+np, func(t *testing.T) {
+			_, ok := goPredicateTest(np)
+			if ok {
+				t.Errorf("goPredicateTest(%q) should return false for non-predicate", np)
+			}
+		})
+	}
+}
