@@ -66,10 +66,11 @@ import (
 
 // Request is the JSON request from Bash
 type Request struct {
-	Class    string   `json:"class"`
-	Instance string   `json:"instance"`
-	Selector string   `json:"selector"`
-	Args     []string `json:"args"`
+	Class     string   `json:"class"`
+	Instance  string   `json:"instance"`
+	Selector  string   `json:"selector"`
+	Args      []string `json:"args"`
+	SessionID string   `json:"session_id,omitempty"` // TRASH_SESSION_ID for BashBridge fallback
 
 	// For bytecode block operations
 	BlockOp       string `json:"block_op,omitempty"`       // "register", "invoke", "serialize"
@@ -326,6 +327,13 @@ func (d *Daemon) respond(w interface{ Write([]byte) (int, error) }, resp Respons
 
 // HandleRequest processes a single dispatch request
 func (d *Daemon) HandleRequest(req Request) Response {
+	// Set session ID for BashBridge to ensure instances are created in the right _ENV_DIR
+	if req.SessionID != "" {
+		cSessionID := C.CString(req.SessionID)
+		defer C.free(unsafe.Pointer(cSessionID))
+		C.TT_SetSessionID(cSessionID)
+	}
+
 	// Handle bytecode block operations
 	if req.BlockOp != "" {
 		return d.handleBlockOp(req)

@@ -459,6 +459,15 @@ func TT_Load(instanceID *C.char) *C.TTInstance {
 // Bash Bridge
 // ============================================================================
 
+//export TT_SetSessionID
+func TT_SetSessionID(sessionID *C.char) {
+	r := runtime.GlobalRuntime()
+	if r == nil || r.BashBridge == nil {
+		return
+	}
+	r.BashBridge.SetSessionID(C.GoString(sessionID))
+}
+
 //export TT_BashFallback
 func TT_BashFallback(receiver, selector *C.char, args **C.char, numArgs C.int) *C.char {
 	r := runtime.GlobalRuntime()

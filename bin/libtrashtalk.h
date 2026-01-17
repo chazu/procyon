@@ -155,6 +155,7 @@ extern TTValue TT_InvokeBlock(char* blockID, TTValue* args, int numArgs);
 extern TTValue TT_InvokeBlockDirect(TTBlock* block, TTValue* args, int numArgs);
 extern int TT_Persist(char* instanceID);
 extern TTInstance* TT_Load(char* instanceID);
+extern void TT_SetSessionID(char* sessionID);
 extern char* TT_BashFallback(char* receiver, char* selector, char** args, int numArgs);
 extern TTValue TT_MakeNil();
 extern TTValue TT_MakeInt(int64_t n);

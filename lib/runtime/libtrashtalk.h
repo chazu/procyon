@@ -222,6 +222,12 @@ extern TTInstance* TT_Load(const char* instanceID);
  * Bash Bridge
  * ============================================================================ */
 
+/* Set the session ID for BashBridge.
+ * This ensures BashBridge uses the same _ENV_DIR as the client.
+ * Call this before each request that may use bash fallback.
+ */
+extern void TT_SetSessionID(const char* sessionID);
+
 /* Fall back to Bash runtime for a message.
  * Used for bashOnly methods or unregistered classes.
  * Returns: Result string (caller must free)

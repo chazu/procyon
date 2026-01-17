@@ -15,8 +15,9 @@ import (
 // It maintains a persistent bash subprocess with trash.bash already sourced,
 // avoiding the overhead of forking and sourcing on every call.
 type BashBridge struct {
-	trashDir string // Path to ~/.trashtalk
-	debug    bool
+	trashDir  string // Path to ~/.trashtalk
+	debug     bool
+	sessionID string // Current client session ID for _ENV_DIR consistency
 
 	// Persistent bash process
 	cmd    *exec.Cmd
@@ -49,6 +50,14 @@ func NewBashBridgeDefault() (*BashBridge, error) {
 // SetDebug enables or disables debug output
 func (bb *BashBridge) SetDebug(debug bool) {
 	bb.debug = debug
+}
+
+// SetSessionID sets the client session ID for _ENV_DIR consistency.
+// This ensures BashBridge uses the same temp directory as the client.
+func (bb *BashBridge) SetSessionID(sessionID string) {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	bb.sessionID = sessionID
 }
 
 // Close shuts down the persistent bash process
@@ -145,8 +154,15 @@ func (bb *BashBridge) execCommand(bashCmd string) (string, int, error) {
 	// Format: __END_MARKER_<exitcode>__
 	marker := "__BASH_BRIDGE_END__"
 
+	// If session ID is set, prepend environment setup to use client's _ENV_DIR
+	// This ensures instances created here are visible to the client's bash
+	sessionSetup := ""
+	if bb.sessionID != "" {
+		sessionSetup = fmt.Sprintf("export TRASH_SESSION_ID=%q; export _ENV_DIR=/tmp/trashtalk_%s; ", bb.sessionID, bb.sessionID)
+	}
+
 	// Run the command, capture exit code, then echo marker with exit code
-	fullCmd := fmt.Sprintf("{ %s; }; __bb_exit=$?; echo \"%s${__bb_exit}__\"\n", bashCmd, marker)
+	fullCmd := fmt.Sprintf("{ %s%s; }; __bb_exit=$?; echo \"%s${__bb_exit}__\"\n", sessionSetup, bashCmd, marker)
 
 	if bb.debug {
 		fmt.Fprintf(os.Stderr, "BashBridge: exec: %s", fullCmd)
