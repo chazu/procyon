@@ -73,7 +73,11 @@ func (bb *BashBridge) ensureProcess() error {
 	trashBash := filepath.Join(bb.trashDir, "lib", "trash.bash")
 
 	// Start bash in interactive-like mode, sourcing trash.bash
+	// CRITICAL: Set TRASHTALK_DISABLE_NATIVE=1 to prevent bash from trying to
+	// call back to the daemon, which would cause deadlock since we're already
+	// inside a daemon request handler.
 	bb.cmd = exec.Command("bash")
+	bb.cmd.Env = append(os.Environ(), "TRASHTALK_DISABLE_NATIVE=1")
 	bb.cmd.Stderr = os.Stderr
 
 	var err error

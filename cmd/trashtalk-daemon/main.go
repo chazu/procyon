@@ -177,7 +177,7 @@ func (d *Daemon) RunStdin() {
 		}
 
 		if *debug {
-			fmt.Fprintf(os.Stderr, "trashtalk-daemon: request class=%s selector=%s\n", req.Class, req.Selector)
+			fmt.Fprintf(os.Stderr, "trashtalk-daemon: request class=%s selector=%s args=%v\n", req.Class, req.Selector, req.Args)
 		}
 
 		resp := d.HandleRequest(req)
@@ -272,6 +272,10 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		return
 	}
 
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: raw request: %s\n", strings.TrimSpace(line))
+	}
+
 	var req Request
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
 		d.respond(conn, Response{ExitCode: 1, Error: "invalid JSON: " + err.Error()})
@@ -279,7 +283,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	}
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: request class=%s selector=%s\n", req.Class, req.Selector)
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: parsed class=%s selector=%s args=%v\n", req.Class, req.Selector, req.Args)
 	}
 
 	resp := d.HandleRequest(req)
@@ -385,18 +389,32 @@ func (d *Daemon) callDispatchFunc(req Request, dispatchFunc unsafe.Pointer) Resp
 	}
 
 	// Parse the JSON response from the dispatch function
+	// Instance can be either a string or an object (plugins return object for updated state)
 	var dispatchResp struct {
-		Instance string `json:"instance,omitempty"`
-		Result   string `json:"result,omitempty"`
-		ExitCode int    `json:"exit_code"`
-		Error    string `json:"error,omitempty"`
+		Instance json.RawMessage `json:"instance,omitempty"`
+		Result   string          `json:"result,omitempty"`
+		ExitCode int             `json:"exit_code"`
+		Error    string          `json:"error,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(resultJSON), &dispatchResp); err != nil {
 		return Response{ExitCode: 1, Error: "invalid dispatch response: " + err.Error()}
 	}
 
+	// Convert instance to string - it may be a JSON object or a JSON string
+	instanceStr := ""
+	if len(dispatchResp.Instance) > 0 {
+		// Check if it's a JSON string (starts with quote) or an object
+		if dispatchResp.Instance[0] == '"' {
+			// It's a JSON string, unmarshal it
+			json.Unmarshal(dispatchResp.Instance, &instanceStr)
+		} else {
+			// It's a JSON object, use as-is
+			instanceStr = string(dispatchResp.Instance)
+		}
+	}
+
 	return Response{
-		Instance: dispatchResp.Instance,
+		Instance: instanceStr,
 		Result:   dispatchResp.Result,
 		ExitCode: dispatchResp.ExitCode,
 		Error:    dispatchResp.Error,

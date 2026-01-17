@@ -727,7 +727,7 @@ func (g *generator) generateSharedMethodExports(f *jen.File, instanceMethods, cl
 		// Return updated instance + result
 		jen.List(jen.Id("updatedJSON"), jen.Id("_")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Op("&").Id("instance")),
 		jen.Return(
-			jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"instance":%s,"result":%q,"exit_code":0}`), jen.String().Parens(jen.Id("updatedJSON")), jen.Id("result")),
+			jen.Qual("fmt", "Sprintf").Call(jen.Lit(`{"instance":%q,"result":%q,"exit_code":0}`), jen.String().Parens(jen.Id("updatedJSON")), jen.Id("result")),
 		),
 	)
 }
