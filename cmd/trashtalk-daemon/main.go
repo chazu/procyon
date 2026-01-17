@@ -27,6 +27,20 @@ static void* load_plugin(const char* path) {
 static const char* load_error() {
     return dlerror();
 }
+
+// Get a symbol from a loaded plugin
+static void* get_symbol(void* handle, const char* name) {
+    return dlsym(handle, name);
+}
+
+// Typedef for the dispatch function signature: char* ClassName_Dispatch(char* instanceJSON, char* selector, char* argsJSON)
+typedef char* (*dispatch_func)(char*, char*, char*);
+
+// Call a dispatch function pointer
+static char* call_dispatch(void* fn_ptr, char* instanceJSON, char* selector, char* argsJSON) {
+    dispatch_func fn = (dispatch_func)fn_ptr;
+    return fn(instanceJSON, selector, argsJSON);
+}
 */
 import "C"
 
@@ -78,12 +92,14 @@ type Response struct {
 
 // Daemon manages plugin loading and dispatch via the shared runtime
 type Daemon struct {
-	pluginDir     string
-	loadedPlugins map[string]bool // Track which plugins we've loaded
-	mu            sync.RWMutex
-	idleTimeout   time.Duration
-	idleTimer     *time.Timer
-	timerMu       sync.Mutex
+	pluginDir      string
+	loadedPlugins  map[string]bool      // Track which plugins we've loaded
+	pluginHandles  map[string]unsafe.Pointer // Store dlopen handles for dlsym
+	dispatchFuncs  map[string]unsafe.Pointer // Cache dispatch function pointers
+	mu             sync.RWMutex
+	idleTimeout    time.Duration
+	idleTimer      *time.Timer
+	timerMu        sync.Mutex
 }
 
 var (
@@ -127,9 +143,11 @@ func main() {
 	}
 
 	d := &Daemon{
-		pluginDir:     dir,
-		loadedPlugins: make(map[string]bool),
-		idleTimeout:   time.Duration(*idleTimeout) * time.Second,
+		pluginDir:      dir,
+		loadedPlugins:  make(map[string]bool),
+		pluginHandles:  make(map[string]unsafe.Pointer),
+		dispatchFuncs:  make(map[string]unsafe.Pointer),
+		idleTimeout:    time.Duration(*idleTimeout) * time.Second,
 	}
 
 	if *socketPath != "" {
@@ -318,6 +336,75 @@ func (d *Daemon) HandleRequest(req Request) Response {
 		return Response{ExitCode: 200}
 	}
 
+	// Check if we have a dispatch function for this class
+	d.mu.RLock()
+	dispatchFunc := d.dispatchFuncs[req.Class]
+	d.mu.RUnlock()
+
+	if dispatchFunc != nil {
+		// Call the plugin's dispatch function directly
+		return d.callDispatchFunc(req, dispatchFunc)
+	}
+
+	// Fall back to TT_Send (for primitive classes that register methods directly)
+	return d.callTTSend(req)
+}
+
+// callDispatchFunc calls the plugin's exported dispatch function directly
+func (d *Daemon) callDispatchFunc(req Request, dispatchFunc unsafe.Pointer) Response {
+	// Prepare instanceJSON - either the instance ID or the class name for class methods
+	instanceJSON := req.Instance
+	if instanceJSON == "" {
+		instanceJSON = req.Class
+	}
+
+	// Convert args to JSON array
+	argsJSON, _ := json.Marshal(req.Args)
+
+	// Create C strings
+	cInstanceJSON := C.CString(instanceJSON)
+	defer C.free(unsafe.Pointer(cInstanceJSON))
+
+	cSelector := C.CString(req.Selector)
+	defer C.free(unsafe.Pointer(cSelector))
+
+	cArgsJSON := C.CString(string(argsJSON))
+	defer C.free(unsafe.Pointer(cArgsJSON))
+
+	// Call the dispatch function via C helper: char* dispatch(char* instanceJSON, char* selector, char* argsJSON)
+	cResult := C.call_dispatch(dispatchFunc, cInstanceJSON, cSelector, cArgsJSON)
+	if cResult == nil {
+		return Response{ExitCode: 1, Error: "dispatch returned nil"}
+	}
+	defer C.free(unsafe.Pointer(cResult))
+
+	resultJSON := C.GoString(cResult)
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: dispatch result: %s\n", resultJSON)
+	}
+
+	// Parse the JSON response from the dispatch function
+	var dispatchResp struct {
+		Instance string `json:"instance,omitempty"`
+		Result   string `json:"result,omitempty"`
+		ExitCode int    `json:"exit_code"`
+		Error    string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &dispatchResp); err != nil {
+		return Response{ExitCode: 1, Error: "invalid dispatch response: " + err.Error()}
+	}
+
+	return Response{
+		Instance: dispatchResp.Instance,
+		Result:   dispatchResp.Result,
+		ExitCode: dispatchResp.ExitCode,
+		Error:    dispatchResp.Error,
+	}
+}
+
+// callTTSend calls TT_Send through the shared runtime (for primitive classes)
+func (d *Daemon) callTTSend(req Request) Response {
 	// Determine the receiver - either instance ID or class name
 	receiver := req.Instance
 	if receiver == "" {
@@ -419,6 +506,29 @@ func (d *Daemon) ensurePluginLoaded(className string) error {
 	if handle == nil {
 		errMsg := C.GoString(C.load_error())
 		return fmt.Errorf("failed to load %s: %s", soPath, errMsg)
+	}
+
+	// Store the handle for later dlsym calls
+	d.pluginHandles[className] = handle
+
+	// Look up the dispatch function: <ShortClassName>_Dispatch
+	// For namespaced classes: Yutani::IDE -> IDE_Dispatch (uses just the class name part)
+	shortClassName := className
+	if idx := strings.LastIndex(className, "::"); idx != -1 {
+		shortClassName = className[idx+2:]
+	}
+	dispatchName := shortClassName + "_Dispatch"
+	cDispatchName := C.CString(dispatchName)
+	defer C.free(unsafe.Pointer(cDispatchName))
+
+	dispatchFunc := C.get_symbol(handle, cDispatchName)
+	if dispatchFunc != nil {
+		d.dispatchFuncs[className] = dispatchFunc
+		if *debug {
+			fmt.Fprintf(os.Stderr, "trashtalk-daemon: found dispatch func %s\n", dispatchName)
+		}
+	} else if *debug {
+		fmt.Fprintf(os.Stderr, "trashtalk-daemon: no dispatch func %s, will use TT_Send\n", dispatchName)
 	}
 
 	if *debug {

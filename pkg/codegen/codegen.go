@@ -101,6 +101,15 @@ func (g *generator) inferType(iv ast.InstanceVar) *jen.Statement {
 	case "number":
 		return jen.Int()
 	case "string":
+		// Check if the string value is actually JSON (object or array)
+		// This handles cases like items:'{}' or elements:'[]' where the
+		// syntax uses a quoted string but the value is meant to be JSON
+		val := strings.TrimSpace(iv.Default.Value)
+		if (strings.HasPrefix(val, "{") && strings.HasSuffix(val, "}")) ||
+			(strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]")) {
+			// This is a JSON object or array, use RawMessage to preserve structure
+			return jen.Qual("encoding/json", "RawMessage")
+		}
 		return jen.String()
 	}
 

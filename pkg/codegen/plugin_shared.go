@@ -36,7 +36,14 @@ func GenerateSharedPluginWithOptions(class *ast.Class, opts GenerateOptions) *Re
 		g.instanceVars[iv.Name] = true
 		// Determine if this var uses json.RawMessage (needs special handling)
 		// String and number types use native Go types, everything else uses json.RawMessage
-		isNativeType := iv.Default.Type == "string" || iv.Default.Type == "number"
+		isNativeType := iv.Default.Type == "number"
+		if iv.Default.Type == "string" {
+			// Check if the string value is actually JSON (object or array)
+			val := strings.TrimSpace(iv.Default.Value)
+			isJSONValue := (strings.HasPrefix(val, "{") && strings.HasSuffix(val, "}")) ||
+				(strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]"))
+			isNativeType = !isJSONValue
+		}
 		if !isNativeType {
 			// Fallback: check if default value looks numeric (for backwards compatibility)
 			isNativeType = isNumericString(iv.Default.Value)

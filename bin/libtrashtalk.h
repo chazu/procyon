@@ -149,6 +149,7 @@ extern TTValue TT_GetIVarByIndex(TTInstance* inst, int index);
 extern void TT_SetIVarByIndex(TTInstance* inst, int index, TTValue val);
 extern TTValue TT_Send(char* receiver, char* selector, TTValue* args, int numArgs);
 extern TTValue TT_SendDirect(TTInstance* inst, char* selector, TTValue* args, int numArgs);
+extern char* TT_RegisterBlock(uint8_t* bytecodeData, size_t bytecodeLen, TTValue** captures, int numCaptures);
 extern TTBlock* TT_LookupBlock(char* blockID);
 extern TTValue TT_InvokeBlock(char* blockID, TTValue* args, int numArgs);
 extern TTValue TT_InvokeBlockDirect(TTBlock* block, TTValue* args, int numArgs);
