@@ -1167,10 +1167,64 @@ func (g *generator) generatePrimitiveMethodObject(f *jen.File, m *compiledMethod
 		// Inspect to specific depth
 		return false
 
-	case "perform_", "perform_with_", "perform_with_with_", "perform_with_with_with_":
-		// Dynamic method dispatch requires runtime message sending
-		// Fall back to bash implementation
-		return false
+	case "perform_":
+		// Dynamic dispatch: call method by selector name
+		// Uses the generated dispatch() function for this class
+		f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(
+			jen.Id("selector").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("dispatch").Call(jen.Id("c"), jen.Id("selector"), jen.Nil())),
+		)
+		f.Line()
+		return true
+
+	case "perform_with_":
+		// Dynamic dispatch with one argument
+		f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(
+			jen.Id("selector").String(),
+			jen.Id("arg1").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("dispatch").Call(
+				jen.Id("c"),
+				jen.Id("selector"),
+				jen.Index().String().Values(jen.Id("arg1")),
+			)),
+		)
+		f.Line()
+		return true
+
+	case "perform_with_with_":
+		// Dynamic dispatch with two arguments
+		f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(
+			jen.Id("selector").String(),
+			jen.Id("arg1").String(),
+			jen.Id("arg2").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("dispatch").Call(
+				jen.Id("c"),
+				jen.Id("selector"),
+				jen.Index().String().Values(jen.Id("arg1"), jen.Id("arg2")),
+			)),
+		)
+		f.Line()
+		return true
+
+	case "perform_with_with_with_":
+		// Dynamic dispatch with three arguments
+		f.Func().Parens(jen.Id("c").Op("*").Id(className)).Id(m.goName).Params(
+			jen.Id("selector").String(),
+			jen.Id("arg1").String(),
+			jen.Id("arg2").String(),
+			jen.Id("arg3").String(),
+		).Parens(jen.List(jen.String(), jen.Error())).Block(
+			jen.Return(jen.Id("dispatch").Call(
+				jen.Id("c"),
+				jen.Id("selector"),
+				jen.Index().String().Values(jen.Id("arg1"), jen.Id("arg2"), jen.Id("arg3")),
+			)),
+		)
+		f.Line()
+		return true
 
 	default:
 		return false
