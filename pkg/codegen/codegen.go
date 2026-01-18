@@ -947,8 +947,9 @@ func (g *generator) generateCondition(expr parser.Expr, m *compiledMethod) *jen.
 	}
 
 	// For message sends and other expressions, wrap in truthiness check
-	// In Trashtalk, non-empty string = truthy
-	return g.generateExpr(expr, m).Op("!=").Lit("")
+	// In Trashtalk, "true" = truthy (matches bash backend which checks == "true")
+	// Methods like objectHasKey: return "true"/"false" strings, not empty/non-empty
+	return g.generateExpr(expr, m).Op("==").Lit("true")
 }
 
 // goPredicateTest maps predicate selectors to Go code generators.
