@@ -1,13 +1,13 @@
-// trashtalk-daemon - Dynamic plugin loader for Trashtalk
+// tt - Trashtalk daemon: dynamic plugin loader and native runtime
 //
 // This daemon initializes the shared runtime (libtrashtalk) and handles
 // method dispatch via Unix socket or stdin/stdout JSON protocol.
 //
-// Build: go build ./cmd/trashtalk-daemon
+// Build: go build ./cmd/tt
 // Usage:
-//   trashtalk-daemon [--plugin-dir DIR]                    # stdin/stdout mode
-//   trashtalk-daemon --socket /tmp/trashtalk.sock          # socket mode
-//   trashtalk-daemon --socket /tmp/trashtalk.sock --idle-timeout 300
+//   tt [--plugin-dir DIR]                    # stdin/stdout mode
+//   tt --socket /tmp/tt.sock                 # socket mode
+//   tt --socket /tmp/tt.sock --idle-timeout 300
 package main
 
 /*
@@ -46,6 +46,7 @@ import "C"
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -55,6 +56,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -62,6 +64,7 @@ import (
 	"unsafe"
 
 	"github.com/chazu/procyon/pkg/bytecode"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // Request is the JSON request from Bash
@@ -81,10 +84,11 @@ type Request struct {
 
 // Response is the JSON response to Bash
 type Response struct {
-	Instance string `json:"instance,omitempty"`
-	Result   string `json:"result,omitempty"`
-	ExitCode int    `json:"exit_code"`
-	Error    string `json:"error,omitempty"`
+	Instance      string `json:"instance,omitempty"`
+	Result        string `json:"result,omitempty"`
+	ExitCode      int    `json:"exit_code"`
+	Error         string `json:"error,omitempty"`
+	ExecutionMode string `json:"execution_mode,omitempty"` // "native", "fallback", or empty
 
 	// For bytecode block operations
 	BlockID   string `json:"block_id,omitempty"`
@@ -106,13 +110,398 @@ type Daemon struct {
 var (
 	pluginDir   = flag.String("plugin-dir", "", "Directory containing .dylib/.so plugins")
 	socketPath  = flag.String("socket", "", "Unix socket path (enables socket mode)")
-	idleTimeout = flag.Int("idle-timeout", 300, "Idle timeout in seconds (socket mode only, 0 = no timeout)")
+	idleTimeout = flag.Int("idle-timeout", 0, "Idle timeout in seconds (socket mode only, 0 = no timeout, default)")
 	debug       = flag.Bool("debug", false, "Enable debug output to stderr")
 	dbPath      = flag.String("db", "", "SQLite database path (default: ~/.trashtalk/instances.db)")
+	killDaemon     = flag.Bool("kill", false, "Kill the running daemon and exit")
+	showStatus     = flag.Bool("status", false, "Show daemon status (running/stopped, PID) and exit")
+	restartDaemon  = flag.Bool("restart", false, "Restart the daemon (kill existing + start new)")
+	tracePath      = flag.String("trace", "", "Enable execution tracing (path to file, or 'stderr' for stderr output)")
+	inspectTarget  = flag.String("inspect", "", "Inspect state: instance ID, 'plugins', or 'classes'")
+	profilePath    = flag.String("profile", "", "Enable performance profiling (path to file, or 'stderr' for stderr output)")
 )
+
+// Trace output writer (nil if tracing disabled)
+var traceWriter *os.File
+
+// Profile output writer (nil if profiling disabled)
+var profileWriter *os.File
+
+// trace logs execution path info when tracing is enabled
+func trace(format string, args ...interface{}) {
+	if traceWriter != nil {
+		timestamp := time.Now().Format("15:04:05.000")
+		msg := fmt.Sprintf(format, args...)
+		fmt.Fprintf(traceWriter, "[%s] %s\n", timestamp, msg)
+	}
+}
+
+// profile logs performance timing data when profiling is enabled
+func profile(operation string, duration time.Duration, details string) {
+	if profileWriter != nil {
+		timestamp := time.Now().Format("15:04:05.000")
+		µs := float64(duration.Nanoseconds()) / 1000.0
+		if details != "" {
+			fmt.Fprintf(profileWriter, "[%s] %s: %.2fµs (%s)\n", timestamp, operation, µs, details)
+		} else {
+			fmt.Fprintf(profileWriter, "[%s] %s: %.2fµs\n", timestamp, operation, µs)
+		}
+	}
+}
+
+// profileEnabled returns true if profiling is active
+func profileEnabled() bool {
+	return profileWriter != nil
+}
+
+// Default socket path when not specified
+const defaultSocketPath = "/tmp/tt.sock"
+
+// handleStatus shows daemon status and exits
+func handleStatus(socketPath, pidFile string) {
+	// Check if PID file exists
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		fmt.Println("Status: stopped")
+		fmt.Println("PID: none")
+		fmt.Printf("Socket: %s (not found)\n", socketPath)
+		return
+	}
+
+	pid := strings.TrimSpace(string(pidBytes))
+	pidInt, err := strconv.Atoi(pid)
+	if err != nil {
+		fmt.Println("Status: stopped (invalid PID file)")
+		fmt.Printf("PID file: %s\n", pidFile)
+		return
+	}
+
+	// Check if process is running
+	process, err := os.FindProcess(pidInt)
+	if err != nil {
+		fmt.Println("Status: stopped")
+		fmt.Printf("PID: %d (not found)\n", pidInt)
+		return
+	}
+
+	// On Unix, FindProcess always succeeds - need to send signal 0 to check
+	err = process.Signal(syscall.Signal(0))
+	if err != nil {
+		fmt.Println("Status: stopped")
+		fmt.Printf("PID: %d (not running)\n", pidInt)
+		return
+	}
+
+	// Check if socket exists
+	socketExists := false
+	if _, err := os.Stat(socketPath); err == nil {
+		socketExists = true
+	}
+
+	fmt.Println("Status: running")
+	fmt.Printf("PID: %d\n", pidInt)
+	if socketExists {
+		fmt.Printf("Socket: %s\n", socketPath)
+	} else {
+		fmt.Printf("Socket: %s (missing)\n", socketPath)
+	}
+}
+
+// handleKill stops the running daemon and exits
+func handleKill(socketPath, pidFile string) {
+	// Read PID from file
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		fmt.Println("No daemon running (PID file not found)")
+		return
+	}
+
+	pid := strings.TrimSpace(string(pidBytes))
+	pidInt, err := strconv.Atoi(pid)
+	if err != nil {
+		fmt.Printf("Invalid PID file: %s\n", pidFile)
+		os.Remove(pidFile)
+		return
+	}
+
+	// Find and kill the process
+	process, err := os.FindProcess(pidInt)
+	if err != nil {
+		fmt.Printf("Process %d not found\n", pidInt)
+		os.Remove(pidFile)
+		os.Remove(socketPath)
+		return
+	}
+
+	// Send SIGTERM
+	err = process.Signal(syscall.SIGTERM)
+	if err != nil {
+		fmt.Printf("Failed to kill process %d: %v\n", pidInt, err)
+		// Clean up stale files anyway
+		os.Remove(pidFile)
+		os.Remove(socketPath)
+		return
+	}
+
+	// Wait briefly for process to exit
+	time.Sleep(100 * time.Millisecond)
+
+	// Clean up files
+	os.Remove(pidFile)
+	os.Remove(socketPath)
+
+	fmt.Printf("Killed daemon (PID %d)\n", pidInt)
+}
+
+// handleKillSilent stops the running daemon without output (for --restart)
+func handleKillSilent(socketPath, pidFile string) {
+	// Read PID from file
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		// No daemon running, nothing to kill
+		if *debug {
+			fmt.Fprintf(os.Stderr, "tt: no existing daemon to kill\n")
+		}
+		return
+	}
+
+	pid := strings.TrimSpace(string(pidBytes))
+	pidInt, err := strconv.Atoi(pid)
+	if err != nil {
+		os.Remove(pidFile)
+		return
+	}
+
+	// Find and kill the process
+	process, err := os.FindProcess(pidInt)
+	if err != nil {
+		os.Remove(pidFile)
+		os.Remove(socketPath)
+		return
+	}
+
+	// Send SIGTERM
+	err = process.Signal(syscall.SIGTERM)
+	if err != nil {
+		// Process may already be dead
+		os.Remove(pidFile)
+		os.Remove(socketPath)
+		return
+	}
+
+	// Wait for process to exit
+	for i := 0; i < 20; i++ { // Wait up to 2 seconds
+		time.Sleep(100 * time.Millisecond)
+		if err := process.Signal(syscall.Signal(0)); err != nil {
+			// Process is gone
+			break
+		}
+	}
+
+	// Clean up files
+	os.Remove(pidFile)
+	os.Remove(socketPath)
+
+	if *debug {
+		fmt.Fprintf(os.Stderr, "tt: killed existing daemon (PID %d)\n", pidInt)
+	}
+}
+
+// handleInspect inspects runtime state (instances, plugins, classes)
+func handleInspect(target, dbFile, pluginDirectory string) {
+	switch target {
+	case "plugins":
+		handleInspectPlugins(pluginDirectory)
+	case "classes":
+		handleInspectClasses(pluginDirectory)
+	default:
+		// Assume it's an instance ID
+		handleInspectInstance(target, dbFile)
+	}
+}
+
+// handleInspectPlugins lists available plugin files
+func handleInspectPlugins(pluginDirectory string) {
+	ext := ".so"
+	if runtime.GOOS == "darwin" {
+		ext = ".dylib"
+	}
+
+	files, err := os.ReadDir(pluginDirectory)
+	if err != nil {
+		fmt.Printf("Error reading plugin directory %s: %v\n", pluginDirectory, err)
+		return
+	}
+
+	fmt.Println("Available Plugins:")
+	fmt.Println("==================")
+	count := 0
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ext) {
+			className := strings.TrimSuffix(f.Name(), ext)
+			// Convert MyApp__Counter back to MyApp::Counter
+			className = strings.ReplaceAll(className, "__", "::")
+			info, _ := f.Info()
+			size := "unknown"
+			if info != nil {
+				size = fmt.Sprintf("%d bytes", info.Size())
+			}
+			fmt.Printf("  %s (%s)\n", className, size)
+			count++
+		}
+	}
+	fmt.Printf("\nTotal: %d plugins\n", count)
+}
+
+// handleInspectClasses lists classes with their method counts
+func handleInspectClasses(pluginDirectory string) {
+	ext := ".so"
+	if runtime.GOOS == "darwin" {
+		ext = ".dylib"
+	}
+
+	files, err := os.ReadDir(pluginDirectory)
+	if err != nil {
+		fmt.Printf("Error reading plugin directory %s: %v\n", pluginDirectory, err)
+		return
+	}
+
+	fmt.Println("Native Classes:")
+	fmt.Println("===============")
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ext) {
+			className := strings.TrimSuffix(f.Name(), ext)
+			className = strings.ReplaceAll(className, "__", "::")
+			fmt.Printf("  %s\n", className)
+		}
+	}
+}
+
+// handleInspectInstance inspects an instance from the database
+func handleInspectInstance(instanceID, dbFile string) {
+	db, err := sql.Open("sqlite3", dbFile)
+	if err != nil {
+		fmt.Printf("Error opening database %s: %v\n", dbFile, err)
+		return
+	}
+	defer db.Close()
+
+	// Query the instance - just get the data column, extract fields from JSON
+	var data string
+	err = db.QueryRow(`SELECT data FROM instances WHERE id = ?`, instanceID).Scan(&data)
+
+	if err == sql.ErrNoRows {
+		fmt.Printf("Instance not found: %s\n", instanceID)
+		return
+	} else if err != nil {
+		fmt.Printf("Error querying instance: %v\n", err)
+		return
+	}
+
+	// Parse the JSON data
+	var instanceData map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &instanceData); err != nil {
+		fmt.Printf("Error parsing instance data: %v\n", err)
+		fmt.Printf("Raw data: %s\n", data)
+		return
+	}
+
+	// Extract class and created_at from the data
+	class, _ := instanceData["class"].(string)
+	createdAt, _ := instanceData["created_at"].(string)
+
+	fmt.Printf("Instance: %s\n", instanceID)
+	fmt.Printf("Class: %s\n", class)
+	if createdAt != "" {
+		fmt.Printf("Created: %s\n", createdAt)
+	}
+
+	fmt.Println("\nInstance Variables:")
+	fmt.Println("-------------------")
+
+	// Print all fields except metadata
+	metaFields := map[string]bool{"class": true, "created_at": true, "id": true}
+	for key, value := range instanceData {
+		if !metaFields[key] {
+			fmt.Printf("  %s: %v\n", key, value)
+		}
+	}
+}
 
 func main() {
 	flag.Parse()
+
+	// Determine socket path for management commands
+	sock := *socketPath
+	if sock == "" {
+		sock = defaultSocketPath
+	}
+	pidFile := sock + ".pid"
+
+	// Handle --status and --kill commands (don't start daemon)
+	if *showStatus {
+		handleStatus(sock, pidFile)
+		return
+	}
+	if *killDaemon {
+		handleKill(sock, pidFile)
+		return
+	}
+
+	// Handle --inspect command
+	if *inspectTarget != "" {
+		// Determine paths for inspection
+		dir := *pluginDir
+		if dir == "" {
+			home, _ := os.UserHomeDir()
+			dir = filepath.Join(home, ".trashtalk", "trash", ".compiled")
+		}
+		db := *dbPath
+		if db == "" {
+			home, _ := os.UserHomeDir()
+			db = filepath.Join(home, ".trashtalk", "instances.db")
+		}
+		handleInspect(*inspectTarget, db, dir)
+		return
+	}
+
+	// Handle --restart: kill existing daemon silently, then continue to start new one
+	if *restartDaemon {
+		// Kill existing daemon if running (don't print messages unless debug)
+		handleKillSilent(sock, pidFile)
+	}
+
+	// Initialize trace output if --trace is specified
+	if *tracePath != "" {
+		if *tracePath == "stderr" {
+			traceWriter = os.Stderr
+		} else {
+			f, err := os.OpenFile(*tracePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "tt: failed to open trace file %s: %v\n", *tracePath, err)
+				os.Exit(1)
+			}
+			traceWriter = f
+			defer f.Close()
+		}
+		trace("tt daemon starting (trace enabled)")
+	}
+
+	// Initialize profile output if --profile is specified
+	if *profilePath != "" {
+		if *profilePath == "stderr" {
+			profileWriter = os.Stderr
+		} else {
+			f, err := os.OpenFile(*profilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "tt: failed to open profile file %s: %v\n", *profilePath, err)
+				os.Exit(1)
+			}
+			profileWriter = f
+			defer f.Close()
+		}
+		profile("startup", 0, "profiling enabled")
+	}
 
 	// Determine plugin directory
 	dir := *pluginDir
@@ -129,18 +518,18 @@ func main() {
 	}
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: initializing shared runtime\n")
+		fmt.Fprintf(os.Stderr, "tt: initializing shared runtime\n")
 	}
 
 	if C.TT_Init(cDbPath, nil) != 0 {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: failed to initialize shared runtime\n")
+		fmt.Fprintf(os.Stderr, "tt: failed to initialize shared runtime\n")
 		os.Exit(1)
 	}
 	defer C.TT_Close()
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: shared runtime initialized\n")
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: plugin-dir=%s\n", dir)
+		fmt.Fprintf(os.Stderr, "tt: shared runtime initialized\n")
+		fmt.Fprintf(os.Stderr, "tt: plugin-dir=%s\n", dir)
 	}
 
 	d := &Daemon{
@@ -178,7 +567,7 @@ func (d *Daemon) RunStdin() {
 		}
 
 		if *debug {
-			fmt.Fprintf(os.Stderr, "trashtalk-daemon: request class=%s selector=%s args=%v\n", req.Class, req.Selector, req.Args)
+			fmt.Fprintf(os.Stderr, "tt: request class=%s selector=%s args=%v\n", req.Class, req.Selector, req.Args)
 		}
 
 		resp := d.HandleRequest(req)
@@ -186,7 +575,7 @@ func (d *Daemon) RunStdin() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: scanner error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "tt: scanner error: %v\n", err)
 	}
 }
 
@@ -197,7 +586,7 @@ func (d *Daemon) RunSocket(path string) {
 
 	listener, err := net.Listen("unix", path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: failed to listen on %s: %v\n", path, err)
+		fmt.Fprintf(os.Stderr, "tt: failed to listen on %s: %v\n", path, err)
 		os.Exit(1)
 	}
 	defer listener.Close()
@@ -207,7 +596,7 @@ func (d *Daemon) RunSocket(path string) {
 	os.Chmod(path, 0777)
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: listening on %s (idle-timeout=%v)\n", path, d.idleTimeout)
+		fmt.Fprintf(os.Stderr, "tt: listening on %s (idle-timeout=%v)\n", path, d.idleTimeout)
 	}
 
 	// Write PID file
@@ -221,7 +610,7 @@ func (d *Daemon) RunSocket(path string) {
 	go func() {
 		<-sigChan
 		if *debug {
-			fmt.Fprintf(os.Stderr, "trashtalk-daemon: shutting down on signal\n")
+			fmt.Fprintf(os.Stderr, "tt: shutting down on signal\n")
 		}
 		listener.Close()
 	}()
@@ -240,7 +629,7 @@ func (d *Daemon) RunSocket(path string) {
 				break
 			}
 			if *debug {
-				fmt.Fprintf(os.Stderr, "trashtalk-daemon: accept error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "tt: accept error: %v\n", err)
 			}
 			continue
 		}
@@ -253,7 +642,7 @@ func (d *Daemon) RunSocket(path string) {
 	}
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: exiting\n")
+		fmt.Fprintf(os.Stderr, "tt: exiting\n")
 	}
 }
 
@@ -268,13 +657,13 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		if *debug {
-			fmt.Fprintf(os.Stderr, "trashtalk-daemon: read error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "tt: read error: %v\n", err)
 		}
 		return
 	}
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: raw request: %s\n", strings.TrimSpace(line))
+		fmt.Fprintf(os.Stderr, "tt: raw request: %s\n", strings.TrimSpace(line))
 	}
 
 	var req Request
@@ -284,7 +673,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	}
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: parsed class=%s selector=%s args=%v\n", req.Class, req.Selector, req.Args)
+		fmt.Fprintf(os.Stderr, "tt: parsed class=%s selector=%s args=%v\n", req.Class, req.Selector, req.Args)
 	}
 
 	resp := d.HandleRequest(req)
@@ -298,7 +687,7 @@ func (d *Daemon) startIdleTimer(listener net.Listener) {
 
 	d.idleTimer = time.AfterFunc(d.idleTimeout, func() {
 		if *debug {
-			fmt.Fprintf(os.Stderr, "trashtalk-daemon: idle timeout reached, shutting down\n")
+			fmt.Fprintf(os.Stderr, "tt: idle timeout reached, shutting down\n")
 		}
 		listener.Close()
 	})
@@ -313,7 +702,7 @@ func (d *Daemon) resetIdleTimer(listener net.Listener) {
 		d.idleTimer.Stop()
 		d.idleTimer = time.AfterFunc(d.idleTimeout, func() {
 			if *debug {
-				fmt.Fprintf(os.Stderr, "trashtalk-daemon: idle timeout reached, shutting down\n")
+				fmt.Fprintf(os.Stderr, "tt: idle timeout reached, shutting down\n")
 			}
 			listener.Close()
 		})
@@ -327,6 +716,18 @@ func (d *Daemon) respond(w interface{ Write([]byte) (int, error) }, resp Respons
 
 // HandleRequest processes a single dispatch request
 func (d *Daemon) HandleRequest(req Request) Response {
+	var requestStart time.Time
+	if profileEnabled() {
+		requestStart = time.Now()
+	}
+
+	// Determine receiver for trace output
+	receiver := req.Class
+	if req.Instance != "" {
+		receiver = req.Instance
+	}
+	trace("DISPATCH %s >> %s", receiver, req.Selector)
+
 	// Set session ID for BashBridge to ensure instances are created in the right _ENV_DIR
 	if req.SessionID != "" {
 		cSessionID := C.CString(req.SessionID)
@@ -336,16 +737,32 @@ func (d *Daemon) HandleRequest(req Request) Response {
 
 	// Handle bytecode block operations
 	if req.BlockOp != "" {
-		return d.handleBlockOp(req)
+		trace("  BLOCK_OP %s (id=%s)", req.BlockOp, req.BlockID)
+		resp := d.handleBlockOp(req)
+		if profileEnabled() {
+			profile("request_total", time.Since(requestStart), fmt.Sprintf("block_op=%s", req.BlockOp))
+		}
+		return resp
 	}
 
 	// Ensure the plugin for this class is loaded
+	var pluginLoadStart time.Time
+	if profileEnabled() {
+		pluginLoadStart = time.Now()
+	}
 	if err := d.ensurePluginLoaded(req.Class); err != nil {
 		if *debug {
-			fmt.Fprintf(os.Stderr, "trashtalk-daemon: no plugin for %s: %v\n", req.Class, err)
+			fmt.Fprintf(os.Stderr, "tt: no plugin for %s: %v\n", req.Class, err)
 		}
 		// No native plugin, signal fallback to Bash
-		return Response{ExitCode: 200}
+		trace("  FALLBACK (no plugin for %s)", req.Class)
+		if profileEnabled() {
+			profile("request_total", time.Since(requestStart), fmt.Sprintf("%s.%s -> fallback", req.Class, req.Selector))
+		}
+		return Response{ExitCode: 200, ExecutionMode: "fallback"}
+	}
+	if profileEnabled() {
+		profile("plugin_ensure", time.Since(pluginLoadStart), req.Class)
 	}
 
 	// Check if we have a dispatch function for this class
@@ -353,13 +770,19 @@ func (d *Daemon) HandleRequest(req Request) Response {
 	dispatchFunc := d.dispatchFuncs[req.Class]
 	d.mu.RUnlock()
 
+	var resp Response
 	if dispatchFunc != nil {
 		// Call the plugin's dispatch function directly
-		return d.callDispatchFunc(req, dispatchFunc)
+		resp = d.callDispatchFunc(req, dispatchFunc)
+	} else {
+		// Fall back to TT_Send (for primitive classes that register methods directly)
+		resp = d.callTTSend(req)
 	}
 
-	// Fall back to TT_Send (for primitive classes that register methods directly)
-	return d.callTTSend(req)
+	if profileEnabled() {
+		profile("request_total", time.Since(requestStart), fmt.Sprintf("%s.%s", req.Class, req.Selector))
+	}
+	return resp
 }
 
 // callDispatchFunc calls the plugin's exported dispatch function directly
@@ -371,7 +794,14 @@ func (d *Daemon) callDispatchFunc(req Request, dispatchFunc unsafe.Pointer) Resp
 	}
 
 	// Convert args to JSON array
+	var marshalStart time.Time
+	if profileEnabled() {
+		marshalStart = time.Now()
+	}
 	argsJSON, _ := json.Marshal(req.Args)
+	if profileEnabled() {
+		profile("json_marshal_args", time.Since(marshalStart), fmt.Sprintf("%d args", len(req.Args)))
+	}
 
 	// Create C strings
 	cInstanceJSON := C.CString(instanceJSON)
@@ -384,7 +814,14 @@ func (d *Daemon) callDispatchFunc(req Request, dispatchFunc unsafe.Pointer) Resp
 	defer C.free(unsafe.Pointer(cArgsJSON))
 
 	// Call the dispatch function via C helper: char* dispatch(char* instanceJSON, char* selector, char* argsJSON)
+	var dispatchStart time.Time
+	if profileEnabled() {
+		dispatchStart = time.Now()
+	}
 	cResult := C.call_dispatch(dispatchFunc, cInstanceJSON, cSelector, cArgsJSON)
+	if profileEnabled() {
+		profile("ffi_dispatch", time.Since(dispatchStart), fmt.Sprintf("%s.%s", req.Class, req.Selector))
+	}
 	if cResult == nil {
 		return Response{ExitCode: 1, Error: "dispatch returned nil"}
 	}
@@ -393,10 +830,14 @@ func (d *Daemon) callDispatchFunc(req Request, dispatchFunc unsafe.Pointer) Resp
 	resultJSON := C.GoString(cResult)
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: dispatch result: %s\n", resultJSON)
+		fmt.Fprintf(os.Stderr, "tt: dispatch result: %s\n", resultJSON)
 	}
 
 	// Parse the JSON response from the dispatch function
+	var unmarshalStart time.Time
+	if profileEnabled() {
+		unmarshalStart = time.Now()
+	}
 	// Instance can be either a string or an object (plugins return object for updated state)
 	var dispatchResp struct {
 		Instance json.RawMessage `json:"instance,omitempty"`
@@ -406,6 +847,9 @@ func (d *Daemon) callDispatchFunc(req Request, dispatchFunc unsafe.Pointer) Resp
 	}
 	if err := json.Unmarshal([]byte(resultJSON), &dispatchResp); err != nil {
 		return Response{ExitCode: 1, Error: "invalid dispatch response: " + err.Error()}
+	}
+	if profileEnabled() {
+		profile("json_unmarshal_resp", time.Since(unmarshalStart), fmt.Sprintf("%d bytes", len(resultJSON)))
 	}
 
 	// Convert instance to string - it may be a JSON object or a JSON string
@@ -421,12 +865,22 @@ func (d *Daemon) callDispatchFunc(req Request, dispatchFunc unsafe.Pointer) Resp
 		}
 	}
 
+	trace("  NATIVE (plugin dispatch) -> %s", truncateResult(dispatchResp.Result))
 	return Response{
-		Instance: instanceStr,
-		Result:   dispatchResp.Result,
-		ExitCode: dispatchResp.ExitCode,
-		Error:    dispatchResp.Error,
+		Instance:      instanceStr,
+		Result:        dispatchResp.Result,
+		ExitCode:      dispatchResp.ExitCode,
+		Error:         dispatchResp.Error,
+		ExecutionMode: "native",
 	}
+}
+
+// truncateResult truncates long results for trace output
+func truncateResult(s string) string {
+	if len(s) > 50 {
+		return s[:50] + "..."
+	}
+	return s
 }
 
 // callTTSend calls TT_Send through the shared runtime (for primitive classes)
@@ -464,7 +918,14 @@ func (d *Daemon) callTTSend(req Request) Response {
 	}
 
 	// Call TT_Send through the shared runtime
+	var sendStart time.Time
+	if profileEnabled() {
+		sendStart = time.Now()
+	}
 	result := C.TT_Send(cReceiver, cSelector, argsPtr, C.int(len(req.Args)))
+	if profileEnabled() {
+		profile("tt_send", time.Since(sendStart), fmt.Sprintf("%s.%s", req.Class, req.Selector))
+	}
 
 	// Check result type for errors
 	if result._type == C.TT_TYPE_ERROR {
@@ -474,7 +935,8 @@ func (d *Daemon) callTTSend(req Request) Response {
 			errMsg := C.GoString(cErrMsg)
 			C.free(unsafe.Pointer(cErrMsg))
 			if strings.Contains(errMsg, "unknown selector") {
-				return Response{ExitCode: 200} // Signal fallback to Bash
+				trace("  FALLBACK (unknown selector: %s)", req.Selector)
+				return Response{ExitCode: 200, ExecutionMode: "fallback"} // Signal fallback to Bash
 			}
 			return Response{ExitCode: 1, Error: errMsg}
 		}
@@ -490,12 +952,14 @@ func (d *Daemon) callTTSend(req Request) Response {
 	}
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: TT_Send result: %q\n", resultStr)
+		fmt.Fprintf(os.Stderr, "tt: TT_Send result: %q\n", resultStr)
 	}
 
+	trace("  NATIVE (TT_Send) -> %s", truncateResult(resultStr))
 	return Response{
-		Result:   resultStr,
-		ExitCode: 0,
+		Result:        resultStr,
+		ExitCode:      0,
+		ExecutionMode: "native",
 	}
 }
 
@@ -551,14 +1015,14 @@ func (d *Daemon) ensurePluginLoaded(className string) error {
 	if dispatchFunc != nil {
 		d.dispatchFuncs[className] = dispatchFunc
 		if *debug {
-			fmt.Fprintf(os.Stderr, "trashtalk-daemon: found dispatch func %s\n", dispatchName)
+			fmt.Fprintf(os.Stderr, "tt: found dispatch func %s\n", dispatchName)
 		}
 	} else if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: no dispatch func %s, will use TT_Send\n", dispatchName)
+		fmt.Fprintf(os.Stderr, "tt: no dispatch func %s, will use TT_Send\n", dispatchName)
 	}
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: loaded plugin %s\n", soPath)
+		fmt.Fprintf(os.Stderr, "tt: loaded plugin %s\n", soPath)
 	}
 
 	d.loadedPlugins[className] = true
@@ -667,7 +1131,7 @@ func (d *Daemon) handleBlockRegister(req Request) Response {
 	C.free(unsafe.Pointer(cBlockID))
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: registered block %s (%d bytes, %d captures)\n",
+		fmt.Fprintf(os.Stderr, "tt: registered block %s (%d bytes, %d captures)\n",
 			blockID, len(serialized), numCaptures)
 	}
 
@@ -718,11 +1182,11 @@ func (d *Daemon) handleBlockInvoke(req Request) Response {
 			C.free(unsafe.Pointer(cErrMsg))
 			// Check if block not found - signal fallback
 			if strings.Contains(errMsg, "not found") {
-				return Response{ExitCode: 200}
+				return Response{ExitCode: 200, ExecutionMode: "fallback"}
 			}
 			return Response{ExitCode: 1, Error: errMsg}
 		}
-		return Response{ExitCode: 200} // Fallback if unknown error
+		return Response{ExitCode: 200, ExecutionMode: "fallback"} // Fallback if unknown error
 	}
 
 	// Convert result to string
@@ -734,11 +1198,11 @@ func (d *Daemon) handleBlockInvoke(req Request) Response {
 	}
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: invoked block %s with %d args -> %q\n",
+		fmt.Fprintf(os.Stderr, "tt: invoked block %s with %d args -> %q\n",
 			req.BlockID, len(args), resultStr)
 	}
 
-	return Response{ExitCode: 0, Result: resultStr}
+	return Response{ExitCode: 0, Result: resultStr, ExecutionMode: "native"}
 }
 
 // handleBlockSerialize serializes a block for cross-process transfer
@@ -786,7 +1250,7 @@ func (d *Daemon) handleBlockSerialize(req Request) Response {
 	// TODO: Implement full capture serialization if needed
 
 	if *debug {
-		fmt.Fprintf(os.Stderr, "trashtalk-daemon: serialized block %s (%d bytes)\n",
+		fmt.Fprintf(os.Stderr, "tt: serialized block %s (%d bytes)\n",
 			req.BlockID, len(bytecodeBytes))
 	}
 
