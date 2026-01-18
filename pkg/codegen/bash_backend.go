@@ -554,6 +554,11 @@ func (b *BashBackend) generateVarRef(e *ir.VarRefExpr) (string, error) {
 
 // generateBinaryExpr generates a binary expression
 func (b *BashBackend) generateBinaryExpr(e *ir.BinaryExpr) (string, error) {
+	// Handle string concatenation specially - collect all parts first
+	if e.Op == "," {
+		return b.generateStringConcat(e)
+	}
+
 	left, err := b.generateExpr(e.Left)
 	if err != nil {
 		return "", err
@@ -575,6 +580,69 @@ func (b *BashBackend) generateBinaryExpr(e *ir.BinaryExpr) (string, error) {
 	default:
 		return fmt.Sprintf("%s %s %s", left, e.Op, right), nil
 	}
+}
+
+// generateStringConcat handles string concatenation with the comma operator.
+// It collects all parts and joins them properly for bash.
+// The result is the content (without outer quotes) - the caller adds quotes.
+func (b *BashBackend) generateStringConcat(e *ir.BinaryExpr) (string, error) {
+	var parts []concatPart
+	b.collectConcatParts(e, &parts)
+
+	var result strings.Builder
+
+	for _, part := range parts {
+		if part.isLiteral {
+			// String literal: escape internal double quotes
+			escaped := strings.ReplaceAll(part.value, "\"", "\\\"")
+			result.WriteString(escaped)
+		} else if strings.HasPrefix(part.value, "$") {
+			// Variable or command substitution
+			varExpr := part.value[1:]
+			if strings.HasPrefix(varExpr, "(") {
+				// Command substitution like $(_ivar foo) - use as-is
+				result.WriteString(part.value)
+			} else {
+				// Simple variable - wrap in ${} for safe interpolation
+				result.WriteString("${" + varExpr + "}")
+			}
+		} else {
+			// Other expressions - include as-is
+			result.WriteString(part.value)
+		}
+	}
+
+	return result.String(), nil
+}
+
+// concatPart represents a part of a string concatenation
+type concatPart struct {
+	value     string
+	isLiteral bool // true if this came from a string literal
+}
+
+// collectConcatParts recursively collects parts of a concatenation expression.
+func (b *BashBackend) collectConcatParts(expr ir.Expression, parts *[]concatPart) {
+	if binExpr, ok := expr.(*ir.BinaryExpr); ok && binExpr.Op == "," {
+		b.collectConcatParts(binExpr.Left, parts)
+		b.collectConcatParts(binExpr.Right, parts)
+		return
+	}
+
+	// Check if this is a string literal
+	if lit, ok := expr.(*ir.LiteralExpr); ok && lit.Type_ == ir.TypeString {
+		// String literals come without quotes, just the content
+		*parts = append(*parts, concatPart{value: fmt.Sprintf("%v", lit.Value), isLiteral: true})
+		return
+	}
+
+	// Generate this expression and add to parts
+	partStr, err := b.generateExpr(expr)
+	if err != nil {
+		*parts = append(*parts, concatPart{value: "", isLiteral: false})
+		return
+	}
+	*parts = append(*parts, concatPart{value: partStr, isLiteral: false})
 }
 
 // generateUnaryExpr generates a unary expression
